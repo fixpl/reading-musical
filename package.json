@@ -1,0 +1,30 @@
+{
+  "name": "reading-musical",
+  "private": true,
+  "scripts": {
+    "backend:dev": "npm --prefix backend run start:dev",
+    "backend:build": "npm --prefix backend run build",
+    "backend:prisma:generate": "npm --prefix backend run prisma:generate",
+    "backend:prisma:validate": "npm --prefix backend run prisma:validate",
+    "backend:prisma:deploy": "npm --prefix backend run prisma:deploy",
+    "backend:prisma:status": "npm --prefix backend run prisma:status",
+    "frontend:dev": "npm --prefix frontend run dev",
+    "frontend:build": "npm --prefix frontend run build",
+    "check": "npm --prefix backend run build && npm --prefix frontend run check",
+    "qa:prd": "node tests/smoke/prd-consistency-smoke.cjs",
+    "qa:api-boundary": "node tests/smoke/api-boundary-smoke.cjs",
+    "qa:api-smoke": "node tests/smoke/api-contract-smoke.cjs",
+    "qa:mail-worker": "node tests/smoke/mail-worker-smoke.cjs",
+    "qa:frontend-smoke": "node tests/smoke/frontend-screen-smoke.cjs",
+    "qa:release": "npm run backend:prisma:validate && npm run backend:prisma:generate && npm run qa:prd && npm run qa:api-boundary && npm run qa:mail-worker && npm run check && npm run frontend:build",
+    "qa:release:full": "npm run qa:release && node tests/smoke/local-release-smoke.cjs",
+    "docker:backend:build": "docker build -t reading-musical-api:local backend",
+    "docker:backend:migration": "docker build --target migration -t reading-musical-api-migration:local backend",
+    "docker:frontend:build": "docker build -t reading-musical-web:local frontend"
+  },
+  "devDependencies": {
+    "playwright": "^1.61.1",
+    "socket.io-client": "^4.8.3"
+  },
+  "packageManager": "pnpm@10.33.0+sha512.10568bb4a6afb58c9eb3630da90cc9516417abebd3fabbe6739f0ae795728da1491e9db5a544c76ad8eb7570f5c4bb3d6c637b2cb41bfdcdb47fa823c8649319"
+}

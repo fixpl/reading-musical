@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.railpack.com",
+  "provider": "node",
+  "packages": {
+    "node": "22"
+  },
+  "steps": {
+    "build": {
+      "commands": [
+        "npm run prisma:generate",
+        "npm run build"
+      ],
+      "variables": {
+        "DATABASE_URL": "postgresql://railpack:railpack@localhost:5432/railpack?schema=public"
+      }
+    }
+  },
+  "deploy": {
+    "startCommand": "if [ \"${PROCESS_ROLE:-api}\" = \"mail-worker\" ]; then npm run mail:worker:prod; else npm run prisma:deploy && npm run start; fi"
+  }
+}

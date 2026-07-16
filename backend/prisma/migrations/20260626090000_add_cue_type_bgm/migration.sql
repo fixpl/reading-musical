@@ -1,0 +1,2 @@
+-- AddEnumValue
+ALTER TYPE "CueType" ADD VALUE IF NOT EXISTS 'BGM';

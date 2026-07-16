@@ -1,0 +1,24 @@
+node_modules/
+dist/
+build/
+.svelte-kit/
+.vite/
+coverage/
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.log
+.DS_Store
+.claude
+.playwright-mcp
+# local tooling state
+.omx/
+
+# Runtime asset bodies are local/persistent data, not source code.
+.asset-objects/
+
+# Documentation and test sources are intentionally kept local.
+docs/
+tests/
+PRD.md

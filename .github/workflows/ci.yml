@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: musical
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d musical"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/musical?schema=public
+      APP_PUBLIC_URL: http://localhost:5173
+      API_EXTERNAL_URL: http://localhost:3000
+      API_PREFIX: /api/v1
+      JWT_ACCESS_SECRET: ci-access-secret-reading-musical-000000
+      JWT_REFRESH_SECRET: ci-refresh-secret-reading-musical-000000
+      CORS_ORIGINS: http://localhost:5173
+      MAIL_TRANSPORT: json
+      MAIL_HOST: localhost
+      MAIL_PORT: 1025
+      MAIL_FROM: no-reply@reading-musical.local
+      MAIL_SECURE: "false"
+      ASSET_OBJECT_DIR: .asset-objects
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+
+      - name: Install backend dependencies
+        run: npm ci --prefix backend
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix frontend
+
+      # CI 전용 임시 PostgreSQL에만 migration을 적용한다. 운영 DB migration은 별도 release job에서 실행해야 한다.
+      - name: Apply migrations to CI database
+        run: npm run backend:prisma:deploy
+
+      # docs/와 tests/는 저장소에 포함하지 않으므로 CI에서는 컴파일 가능한지만 검증한다.
+      - name: Validate and build backend
+        run: npm run backend:prisma:validate && npm run backend:prisma:generate && npm run backend:build
+
+      - name: Check and build frontend
+        run: npm --prefix frontend run check && npm run frontend:build

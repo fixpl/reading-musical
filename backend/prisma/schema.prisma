@@ -1,0 +1,1122 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum PlatformRole {
+  SUPER_ADMIN
+  ORG_ADMIN
+  MEMBER
+  @@map("platform_role")
+}
+
+enum OrganizationStatus {
+  ACTIVE
+  INACTIVE
+  @@map("organization_status")
+}
+
+enum AdminSettingValueType {
+  STRING
+  NUMBER
+  BOOLEAN
+  JSON
+  @@map("admin_setting_value_type")
+}
+
+enum ProfileType {
+  ACTOR
+  STAFF
+  DIRECTOR
+  MUSIC_DIRECTOR
+  STAGE_MANAGER
+  PLANNER
+  OTHER
+  @@map("profile_type")
+}
+
+enum ProductionRole {
+  PRODUCER
+  DIRECTOR
+  MUSIC_DIRECTOR
+  STAGE_MANAGER
+  ACTOR
+  STAFF
+  GUEST
+  @@map("production_role")
+}
+
+enum StaffDiscipline {
+  SOUND
+  LIGHTING
+  STAGE_CREW
+  PROPS
+  COSTUME
+  MAKEUP
+  VIDEO
+  FRONT_OF_HOUSE
+  PRODUCTION_ASSISTANT
+  ACCOMPANIST
+  OTHER
+  @@map("staff_discipline")
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+  UNSPECIFIED
+  @@map("gender")
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  BLOCKED
+  @@map("user_status")
+}
+
+enum Phase {
+  PLANNING
+  READING
+  REHEARSAL
+  PERFORMANCE
+  @@map("phase")
+}
+
+enum Visibility {
+  DRAFT
+  PUBLISHED
+  @@map("visibility")
+}
+
+enum EventType {
+  READING
+  MUSIC_PRACTICE
+  REHEARSAL
+  ENSEMBLE
+  PERFORMANCE
+  @@map("event_type")
+}
+
+enum AttendanceStatus {
+  INVITED
+  ACCEPTED
+  DECLINED
+  TENTATIVE
+  @@map("attendance_status")
+}
+
+enum InviteStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  REVOKED
+  @@map("invite_status")
+}
+
+enum AssetKind {
+  AUDIO
+  IMAGE
+  DOCUMENT
+  @@map("asset_kind")
+}
+
+enum SceneBlockType {
+  DIALOGUE
+  LYRIC
+  STAGE_DIRECTION
+  NOTE
+  @@map("scene_block_type")
+}
+
+enum AnnotationType {
+  DIRECTION
+  PRONUNCIATION
+  ACTING
+  NOTE
+  @@map("annotation_type")
+}
+
+enum AnchorStatus {
+  OK
+  UNLINKED
+  BROKEN
+  @@map("anchor_status")
+}
+
+enum CastAssignmentKind {
+  MAIN
+  DOUBLE
+  UNDERSTUDY
+  @@map("cast_assignment_kind")
+}
+
+enum CueType {
+  START
+  BGM
+  STOP
+  PAUSE
+  RESUME
+  SFX
+  MIC
+  NOTE
+  @@map("cue_type")
+}
+
+enum CueFireMode {
+  MANUAL
+  AUTO_MARKER
+  @@map("cue_fire_mode")
+}
+
+enum ChecklistStatus {
+  TODO
+  IN_PROGRESS
+  WAITING_APPROVAL
+  DONE
+  BLOCKED
+  @@map("checklist_status")
+}
+
+enum LinkedResourceType {
+  SCRIPT
+  SCENE
+  SCENE_BLOCK
+  MUSIC_CUE
+  STAGE_PLAN
+  EVENT
+  ASSET
+  RUN_SHEET
+  RUN_SHEET_ITEM
+  @@map("linked_resource_type")
+}
+
+enum RunSheetStatus {
+  DRAFT
+  LOCKED
+  COMPLETED
+  @@map("run_sheet_status")
+}
+
+enum RunSheetItemType {
+  SCENE
+  CUE
+  STAGE_NOTE
+  CHECK
+  BREAK
+  ANNOUNCEMENT
+  @@map("run_sheet_item_type")
+}
+
+enum EmailDeliveryStatus {
+  QUEUED
+  PROCESSING
+  SENT
+  FAILED
+  SKIPPED
+  @@map("email_delivery_status")
+}
+
+model User {
+  id String @id @default(uuid())
+  organizationId String? @map("organization_id")
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  email String @unique
+  passwordHash String @map("password_hash")
+  name String
+  phone String?
+  gender Gender @default(UNSPECIFIED)
+  birthDate DateTime? @map("birth_date")
+  address String?
+  profileType ProfileType @default(ACTOR) @map("profile_type")
+  profileDetails Json? @map("profile_details")
+  photoAssetId String? @map("photo_asset_id")
+  profileComplete Boolean @default(false) @map("profile_complete")
+  status UserStatus @default(ACTIVE)
+  failedLoginCount Int @default(0) @map("failed_login_count")
+  lockedUntil DateTime? @map("locked_until")
+  emailNotify Boolean @default(true) @map("email_notify")
+  platformRole PlatformRole @default(MEMBER) @map("platform_role")
+  memberships Membership[]
+  availabilities Availability[]
+  emailDeliveries EmailDelivery[]
+  authSessions AuthSession[]
+  assets Asset[]
+  handledInquiries Inquiry[] @relation("InquiryHandledBy")
+  planningMemos PlanningMemo[]
+  boardPosts BoardPost[]
+  boardComments BoardComment[]
+  trackCues TrackCue[]
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@index([organizationId])
+  @@index([profileType])
+  @@index([status])
+  @@index([lockedUntil])
+  @@map("users")
+}
+
+model AuthSession {
+  id String @id @default(uuid())
+  userId String @map("user_id")
+  user User @relation(fields: [userId], references: [id])
+  tokenHash String @map("token_hash")
+  expiresAt DateTime @map("expires_at")
+  lastRotatedAt DateTime @default(now()) @map("last_rotated_at")
+  revokedAt DateTime? @map("revoked_at")
+  revokedReason String? @map("revoked_reason")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+  @@index([userId])
+  @@index([expiresAt])
+  @@index([revokedAt])
+  @@map("auth_sessions")
+}
+
+model Organization {
+  id String @id @default(uuid())
+  name String
+  status OrganizationStatus @default(ACTIVE)
+  users User[]
+  productions Production[]
+  activityLogs ActivityLog[]
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+  @@map("organizations")
+}
+
+model Production {
+  id String @id @default(uuid())
+  organizationId String @map("organization_id")
+  organization Organization @relation(fields: [organizationId], references: [id])
+  title String
+  slug String? @unique
+  synopsis String? @db.Text
+  description String? @db.Text
+  venue String?
+  startDate DateTime? @map("start_date")
+  endDate DateTime? @map("end_date")
+  currentPhase Phase @default(PLANNING) @map("current_phase")
+  visibility Visibility @default(DRAFT)
+  archived Boolean @default(false)
+  // 소프트 삭제: 실제 데이터는 지우지 않고 이 필드로 "삭제됨(휴지통)"을 표시한다. 목록·접근에서 제외, 복구 가능.
+  deletedAt DateTime? @map("deleted_at")
+  positionRequirements PositionRequirement[]
+  memberships Membership[]
+  scripts Script[]
+  roles Role[]
+  musicTracks MusicTrack[]
+  musicCues MusicCue[]
+  stagePlans StagePlan[]
+  events ScheduleEvent[]
+  runSheets RunSheet[]
+  guestReadingAccesses GuestReadingAccess[]
+  staffAssignments StaffAssignment[]
+  checklistPhases ChecklistPhase[]
+  notifications Notification[]
+  invitations Invitation[]
+  emailDeliveries EmailDelivery[]
+  activityLogs ActivityLog[]
+  readingSessions ReadingSession[]
+  assets Asset[]
+  inquiries Inquiry[]
+  planningMemos PlanningMemo[]
+  boardPosts BoardPost[]
+  cueTracks CueTrack[]
+  trackCues TrackCue[]
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@index([organizationId])
+  @@unique([organizationId, title])
+  @@map("productions")
+}
+
+model Membership {
+  id String @id @default(uuid())
+  userId String @map("user_id")
+  user User @relation(fields: [userId], references: [id])
+  productionId String @map("production_id")
+  production Production @relation(fields: [productionId], references: [id])
+  primaryRole ProductionRole @map("primary_role")
+  roles MembershipRole[]
+  staffAssignments StaffAssignment[]
+  castAssignments CastAssignment[]
+  attendances Attendance[]
+  checklistAssignments ChecklistAssignment[]
+  ownedRunSheetItems RunSheetItem[]
+  ownedCueTracks CueTrack[]
+  createdAt DateTime @default(now()) @map("created_at")
+  @@unique([userId, productionId])
+  @@index([productionId])
+  @@map("memberships")
+}
+
+model MembershipRole {
+  id String @id @default(uuid())
+  membershipId String @map("membership_id")
+  membership Membership @relation(fields: [membershipId], references: [id])
+  role ProductionRole
+  grantedById String? @map("granted_by_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  @@unique([membershipId, role])
+  @@index([role])
+  @@map("membership_roles")
+}
+
+model StaffAssignment {
+  id String @id @default(uuid())
+  productionId String @map("production_id")
+  production Production @relation(fields: [productionId], references: [id])
+  membershipId String @map("membership_id")
+  membership Membership @relation(fields: [membershipId], references: [id])
+  discipline StaffDiscipline
+  assignmentKey String @map("assignment_key")
+  customLabel String? @map("custom_label")
+  isLead Boolean @default(false) @map("is_lead")
+  note String?
+  createdAt DateTime @default(now()) @map("created_at")
+  @@unique([membershipId, assignmentKey])
+  @@index([productionId, discipline])
+  @@map("staff_assignments")
+}
+
+model Invitation {
+  id String @id @default(uuid())
+  productionId String @map("production_id")
+  production Production @relation(fields: [productionId], references: [id])
+  email String
+  role ProductionRole
+  token String @unique
+  status InviteStatus @default(PENDING)
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([productionId])
+  @@map("invitations")
+}
+
+model PositionRequirement {
+  id String @id @default(uuid())
+  productionId String @map("production_id")
+  production Production @relation(fields: [productionId], references: [id])
+  role ProductionRole
+  label String
+  requiredCount Int @default(1) @map("required_count")
+  @@index([productionId])
+  @@map("position_requirements")
+}
+
+model Availability {
+  id String @id @default(uuid())
+  userId String @map("user_id")
+  user User @relation(fields: [userId], references: [id])
+  title String?
+  startAt DateTime @map("start_at")
+  endAt DateTime @map("end_at")
+  isAvailable Boolean @default(false) @map("is_available")
+  reason String?
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([userId, startAt])
+  @@map("availabilities")
+}
+
+model Script {
+  id String @id @default(uuid())
+  productionId String @map("production_id")
+  production Production @relation(fields: [productionId], references: [id])
+  title String
+  imports ScriptImport[]
+  acts Act[]
+  versions ScriptVersion[]
+  // 소프트 삭제(휴지통) — 실데이터는 남기고 목록·큐시트에서 감춘다. 복구 가능.
+  deletedAt DateTime? @map("deleted_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@index([productionId])
+  @@map("scripts")
+}
+
+model ScriptImport {
+  id String @id @default(uuid())
+  scriptId String @map("script_id")
+  script Script @relation(fields: [scriptId], references: [id])
+  assetId String @map("asset_id")
+  asset Asset @relation(fields: [assetId], references: [id])
+  status String @default("DRAFT") // DRAFT | APPLIED | REJECTED | FAILED
+  parsedJson Json? @map("parsed_json")
+  errorMessage String? @map("error_message")
+  createdById String @map("created_by_id")
+  appliedAt DateTime? @map("applied_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([scriptId, status])
+  @@map("script_imports")
+}
+
+model Act {
+  id String @id @default(uuid())
+  scriptId String @map("script_id")
+  script Script @relation(fields: [scriptId], references: [id])
+  order Int
+  title String
+  scenes Scene[]
+  @@map("acts")
+}
+
+model Scene {
+  id String @id @default(uuid())
+  actId String @map("act_id")
+  act Act @relation(fields: [actId], references: [id])
+  order Int
+  title String
+  summary String?
+  blocks SceneBlock[]
+  sceneRoles SceneRole[]
+  cues MusicCue[]
+  annotations Annotation[]
+  eventScenes EventScene[]
+  stageNotes StageSceneNote[]
+  runSheetItems RunSheetItem[]
+  @@index([actId])
+  @@map("scenes")
+  trackCues TrackCue[]
+}
+
+model SceneBlock {
+  id String @id @default(uuid())
+  sceneId String @map("scene_id")
+  scene Scene @relation(fields: [sceneId], references: [id])
+  order Int
+  type SceneBlockType
+  characterId String? @map("character_id")
+  character Role? @relation(fields: [characterId], references: [id])
+  text String @db.Text
+  cueLabel String? @map("cue_label")
+  annotations Annotation[]
+  musicCues MusicCue[]
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@index([sceneId, order])
+  @@index([characterId])
+  @@map("scene_blocks")
+}
+
+model ScriptVersion {
+  id String @id @default(uuid())
+  scriptId String @map("script_id")
+  script Script @relation(fields: [scriptId], references: [id])
+  label String
+  snapshot Json
+  authorId String @map("author_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([scriptId])
+  @@map("script_versions")
+}
+
+model Annotation {
+  id String @id @default(uuid())
+  sceneId String @map("scene_id")
+  scene Scene @relation(fields: [sceneId], references: [id])
+  anchorBlockId String? @map("anchor_block_id")
+  anchorBlock SceneBlock? @relation(fields: [anchorBlockId], references: [id])
+  authorId String @map("author_id")
+  type AnnotationType
+  content String @db.Text
+  isShared Boolean @default(false) @map("is_shared")
+  anchorStatus AnchorStatus @default(OK) @map("anchor_status")
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([sceneId])
+  @@index([anchorBlockId])
+  @@map("annotations")
+}
+
+model Role {
+  id String @id @default(uuid())
+  productionId String @map("production_id")
+  production Production @relation(fields: [productionId], references: [id])
+  name String
+  description String?
+  assignments CastAssignment[]
+  sceneRoles SceneRole[]
+  dialogueBlocks SceneBlock[]
+  trackCues TrackCue[]
+  @@index([productionId])
+  @@map("roles")
+}
+
+model CastAssignment {
+  id String @id @default(uuid())
+  roleId String @map("role_id")
+  role Role @relation(fields: [roleId], references: [id])
+  membershipId String @map("membership_id")
+  membership Membership @relation(fields: [membershipId], references: [id])
+  kind CastAssignmentKind @default(MAIN)
+  @@unique([roleId, membershipId])
+  @@map("cast_assignments")
+}
+
+model SceneRole {
+  id String @id @default(uuid())
+  sceneId String @map("scene_id")
+  scene Scene @relation(fields: [sceneId], references: [id])
+  roleId String @map("role_id")
+  role Role @relation(fields: [roleId], references: [id])
+  lineCount Int @default(0) @map("line_count")
+  songCount Int @default(0) @map("song_count")
+  @@unique([sceneId, roleId])
+  @@map("scene_roles")
+}
+
+model MusicTrack {
+  id String @id @default(uuid())
+  productionId String @map("production_id")
+  production Production @relation(fields: [productionId], references: [id])
+  assetId String @map("asset_id")
+  asset Asset @relation(fields: [assetId], references: [id])
+  title String
+  durationMs Int? @map("duration_ms")
+  waveformPeaksJson Json? @map("waveform_peaks_json")
+  cues MusicCue[]
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([productionId])
+  @@index([assetId])
+  @@map("music_tracks")
+}
+
+model MusicCue {
+  id String @id @default(uuid())
+  productionId String @map("production_id")
+  production Production @relation(fields: [productionId], references: [id])
+  trackId String @map("track_id")
+  track MusicTrack @relation(fields: [trackId], references: [id])
+  sceneId String? @map("scene_id")
+  scene Scene? @relation(fields: [sceneId], references: [id])
+  anchorBlockId String? @map("anchor_block_id")
+  anchorBlock SceneBlock? @relation(fields: [anchorBlockId], references: [id])
+  cueNumber String @map("cue_number")
+  cueType CueType @default(START) @map("cue_type")
+  order Int
+  trackStartMs Int @default(0) @map("track_start_ms")
+  trackEndMs Int? @map("track_end_ms")
+  fadeInMs Int @default(0) @map("fade_in_ms")
+  fadeOutMs Int @default(0) @map("fade_out_ms")
+  volumeDb Float @default(0) @map("volume_db")
+  fireMode CueFireMode @default(MANUAL) @map("fire_mode")
+  note String?
+  anchorStatus AnchorStatus @default(UNLINKED) @map("anchor_status")
+  fireLogs CueFireLog[]
+  eventMusicCues EventMusicCue[]
+  runSheetItems RunSheetItem[]
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([sceneId])
+  @@index([anchorBlockId])
+  @@index([productionId, order])
+  @@map("music_cues")
+}
+
+model StagePlan {
+  id String @id @default(uuid())
+  productionId String @map("production_id")
+  production Production @relation(fields: [productionId], references: [id])
+  name String
+  layout Json
+  elements StageElement[]
+  sceneNotes StageSceneNote[]
+  @@index([productionId])
+  @@map("stage_plans")
+}
+
+model StageElement {
+  id String @id @default(uuid())
+  stagePlanId String @map("stage_plan_id")
+  stagePlan StagePlan @relation(fields: [stagePlanId], references: [id])
+  kind String
+  label String
+  x Float
+  y Float
+  note String?
+  @@map("stage_elements")
+}
+
+model StageSceneNote {
+  id String @id @default(uuid())
+  stagePlanId String @map("stage_plan_id")
+  stagePlan StagePlan @relation(fields: [stagePlanId], references: [id])
+  sceneId String @map("scene_id")
+  scene Scene @relation(fields: [sceneId], references: [id])
+  note String @db.Text
+  checklistItemId String? @map("checklist_item_id")
+  runSheetItems RunSheetItem[]
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@unique([stagePlanId, sceneId])
+  @@index([sceneId])
+  @@map("stage_scene_notes")
+}
+
+model ScheduleEvent {
+  id String @id @default(uuid())
+  productionId String @map("production_id")
+  production Production @relation(fields: [productionId], references: [id])
+  type EventType
+  title String
+  startAt DateTime @map("start_at")
+  endAt DateTime @map("end_at")
+  location String?
+  meetingUrl String? @map("meeting_url")
+  scenes EventScene[]
+  musicCues EventMusicCue[]
+  attendances Attendance[]
+  checklistItems ChecklistItem[]
+  readingSessions ReadingSession[]
+  runSheets RunSheet[]
+  guestReadingAccesses GuestReadingAccess[]
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([productionId, startAt])
+  @@map("schedule_events")
+}
+
+model EventScene {
+  id String @id @default(uuid())
+  eventId String @map("event_id")
+  event ScheduleEvent @relation(fields: [eventId], references: [id])
+  sceneId String @map("scene_id")
+  scene Scene @relation(fields: [sceneId], references: [id])
+  @@unique([eventId, sceneId])
+  @@map("event_scenes")
+}
+
+model EventMusicCue {
+  id String @id @default(uuid())
+  eventId String @map("event_id")
+  event ScheduleEvent @relation(fields: [eventId], references: [id])
+  cueId String @map("cue_id")
+  cue MusicCue @relation(fields: [cueId], references: [id])
+  @@unique([eventId, cueId])
+  @@map("event_music_cues")
+}
+
+model Attendance {
+  id String @id @default(uuid())
+  eventId String @map("event_id")
+  event ScheduleEvent @relation(fields: [eventId], references: [id])
+  membershipId String @map("membership_id")
+  membership Membership @relation(fields: [membershipId], references: [id])
+  status AttendanceStatus @default(INVITED)
+  forced Boolean @default(false)
+  forcedReason String? @map("forced_reason")
+  @@unique([eventId, membershipId])
+  @@map("attendances")
+}
+
+model RunSheet {
+  id String @id @default(uuid())
+  productionId String @map("production_id")
+  production Production @relation(fields: [productionId], references: [id])
+  eventId String @map("event_id")
+  event ScheduleEvent @relation(fields: [eventId], references: [id])
+  title String
+  version Int @default(1)
+  status RunSheetStatus @default(DRAFT)
+  items RunSheetItem[]
+  readingSessions ReadingSession[]
+  createdById String @map("created_by_id")
+  lockedAt DateTime? @map("locked_at")
+  completedAt DateTime? @map("completed_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@unique([eventId, version])
+  @@index([productionId])
+  @@map("run_sheets")
+}
+
+model RunSheetItem {
+  id String @id @default(uuid())
+  runSheetId String @map("run_sheet_id")
+  runSheet RunSheet @relation(fields: [runSheetId], references: [id])
+  order Int
+  itemType RunSheetItemType @map("item_type")
+  sceneId String? @map("scene_id")
+  scene Scene? @relation(fields: [sceneId], references: [id])
+  cueId String? @map("cue_id")
+  cue MusicCue? @relation(fields: [cueId], references: [id])
+  stageSceneNoteId String? @map("stage_scene_note_id")
+  stageSceneNote StageSceneNote? @relation(fields: [stageSceneNoteId], references: [id])
+  checklistItemId String? @map("checklist_item_id")
+  checklistItem ChecklistItem? @relation(fields: [checklistItemId], references: [id])
+  title String
+  estimatedDurationMin Int? @map("estimated_duration_min")
+  ownerRole ProductionRole? @map("owner_role")
+  ownerMembershipId String? @map("owner_membership_id")
+  ownerMembership Membership? @relation(fields: [ownerMembershipId], references: [id])
+  staffDiscipline StaffDiscipline? @map("staff_discipline")
+  note String?
+  completedAt DateTime? @map("completed_at")
+  completedById String? @map("completed_by_id")
+  @@index([runSheetId, order])
+  @@index([sceneId])
+  @@index([cueId])
+  @@index([staffDiscipline])
+  @@map("run_sheet_items")
+}
+
+model ReadingSession {
+  id String @id @default(uuid())
+  productionId String @map("production_id")
+  production Production @relation(fields: [productionId], references: [id])
+  eventId String? @map("event_id")
+  event ScheduleEvent? @relation(fields: [eventId], references: [id])
+  runSheetId String? @map("run_sheet_id")
+  runSheet RunSheet? @relation(fields: [runSheetId], references: [id])
+  startedAt DateTime? @map("started_at")
+  endedAt DateTime? @map("ended_at")
+  currentSceneId String? @map("current_scene_id")
+  currentBlockId String? @map("current_block_id")
+  progressNote String? @db.Text @map("progress_note")
+  cueFireLogs CueFireLog[]
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([productionId])
+  @@index([eventId])
+  @@index([runSheetId])
+  @@map("reading_sessions")
+}
+
+model GuestReadingAccess {
+  id String @id @default(uuid())
+  productionId String @map("production_id")
+  production Production @relation(fields: [productionId], references: [id])
+  eventId String @map("event_id")
+  event ScheduleEvent @relation(fields: [eventId], references: [id])
+  token String @unique
+  label String?
+  expiresAt DateTime @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  createdById String @map("created_by_id")
+  lastViewedAt DateTime? @map("last_viewed_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([productionId, eventId])
+  @@index([expiresAt])
+  @@index([revokedAt])
+  @@map("guest_reading_accesses")
+}
+
+model CueFireLog {
+  id String @id @default(uuid())
+  sessionId String @map("session_id")
+  session ReadingSession @relation(fields: [sessionId], references: [id])
+  cueId String @map("cue_id")
+  cue MusicCue @relation(fields: [cueId], references: [id])
+  firedById String @map("fired_by_id")
+  firedAt DateTime @default(now()) @map("fired_at")
+  payload Json?
+  @@index([sessionId, firedAt])
+  @@map("cue_fire_logs")
+}
+
+model ChecklistPhase {
+  id String @id @default(uuid())
+  productionId String @map("production_id")
+  production Production @relation(fields: [productionId], references: [id])
+  phase Phase
+  items ChecklistItem[]
+  @@unique([productionId, phase])
+  @@map("checklist_phases")
+}
+
+model ChecklistItem {
+  id String @id @default(uuid())
+  phaseId String @map("phase_id")
+  phase ChecklistPhase @relation(fields: [phaseId], references: [id])
+  eventId String? @map("event_id")
+  event ScheduleEvent? @relation(fields: [eventId], references: [id])
+  order Int
+  label String
+  description String?
+  status ChecklistStatus @default(TODO)
+  assigneeRole ProductionRole? @map("assignee_role")
+  staffDiscipline StaffDiscipline? @map("staff_discipline")
+  assignments ChecklistAssignment[]
+  runSheetItems RunSheetItem[]
+  requiresApproval Boolean @default(false) @map("requires_approval")
+  dueAt DateTime? @map("due_at")
+  linkedResourceType LinkedResourceType? @map("linked_resource_type")
+  linkedResourceId String? @map("linked_resource_id")
+  done Boolean @default(false)
+  doneAt DateTime? @map("done_at")
+  doneBy String? @map("done_by")
+  completionNote String? @map("completion_note")
+  evidenceAssetIds Json? @map("evidence_asset_ids")
+  approvedById String? @map("approved_by_id")
+  approvedAt DateTime? @map("approved_at")
+  reviewNote String? @map("review_note")
+  @@index([phaseId, status])
+  @@index([eventId])
+  @@map("checklist_items")
+}
+
+model ChecklistAssignment {
+  id String @id @default(uuid())
+  itemId String @map("item_id")
+  item ChecklistItem @relation(fields: [itemId], references: [id])
+  membershipId String @map("membership_id")
+  membership Membership @relation(fields: [membershipId], references: [id])
+  @@unique([itemId, membershipId])
+  @@map("checklist_assignments")
+}
+
+model Notification {
+  id String @id @default(uuid())
+  productionId String? @map("production_id")
+  production Production? @relation(fields: [productionId], references: [id])
+  userId String @map("user_id")
+  type String
+  payload Json
+  readAt DateTime? @map("read_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([userId, readAt])
+  @@map("notifications")
+}
+
+model EmailDelivery {
+  id String @id @default(uuid())
+  userId String? @map("user_id")
+  user User? @relation(fields: [userId], references: [id])
+  productionId String? @map("production_id")
+  production Production? @relation(fields: [productionId], references: [id])
+  toEmail String @map("to_email")
+  subject String
+  bodyText String @db.Text @map("body_text")
+  templateKey String @map("template_key")
+  status EmailDeliveryStatus @default(QUEUED)
+  attempts Int @default(0)
+  lastAttemptAt DateTime? @map("last_attempt_at")
+  nextAttemptAt DateTime? @map("next_attempt_at")
+  skippedReason String? @map("skipped_reason")
+  providerMessageId String? @map("provider_message_id")
+  errorMessage String? @map("error_message")
+  metadata Json?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+  sentAt DateTime? @map("sent_at")
+  @@index([userId, createdAt])
+  @@index([productionId, createdAt])
+  @@index([toEmail])
+  @@index([status, createdAt])
+  @@index([status, nextAttemptAt])
+  @@map("email_deliveries")
+}
+
+model ActivityLog {
+  id String @id @default(uuid())
+  productionId String? @map("production_id")
+  production Production? @relation(fields: [productionId], references: [id])
+  organizationId String? @map("organization_id")
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  actorId String @map("actor_id")
+  action String
+  entity String
+  entityId String @map("entity_id")
+  reason String?
+  beforeJson Json? @map("before_json")
+  afterJson Json? @map("after_json")
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([productionId, createdAt])
+  @@index([productionId, action, createdAt])
+  @@index([organizationId, createdAt])
+  @@index([organizationId, action, createdAt])
+  @@index([actorId, createdAt])
+  @@index([actorId, action, createdAt])
+  @@index([entityId, createdAt])
+  @@index([entity, entityId, action, createdAt])
+  @@map("activity_logs")
+}
+
+model Asset {
+  id String @id @default(uuid())
+  ownerId String @map("owner_id")
+  owner User @relation(fields: [ownerId], references: [id])
+  productionId String? @map("production_id")
+  production Production? @relation(fields: [productionId], references: [id])
+  kind AssetKind
+  storageKey String @map("storage_key")
+  mime String
+  sizeBytes Int @map("size_bytes")
+  checksum String?
+  musicTracks MusicTrack[]
+  scriptImports ScriptImport[]
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([productionId])
+  @@index([ownerId])
+  @@map("assets")
+}
+
+model ChecklistTemplate {
+  id String @id @default(uuid())
+  phase Phase
+  order Int
+  label String
+  description String?
+  assigneeRole ProductionRole? @map("assignee_role")
+  staffDiscipline StaffDiscipline? @map("staff_discipline")
+  requiresApproval Boolean @default(false) @map("requires_approval")
+  active Boolean @default(true)
+  createdById String? @map("created_by_id")
+  updatedById String? @map("updated_by_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@unique([phase, label])
+  @@index([phase, active])
+  @@map("checklist_templates")
+}
+
+model SystemSetting {
+  key String @id
+  value Json
+  valueType AdminSettingValueType @default(JSON) @map("value_type")
+  description String?
+  updatedById String? @map("updated_by_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@map("system_settings")
+}
+
+enum InquiryStatus {
+  NEW
+  IN_REVIEW
+  REPLIED
+  CONVERTED
+  CLOSED
+
+  @@map("inquiry_status")
+}
+
+model Inquiry {
+  id String @id @default(uuid())
+  orgName String @map("org_name")
+  contactName String @map("contact_name")
+  email String
+  phone String?
+  preferredTiming String? @map("preferred_timing")
+  audience String?
+  message String @db.Text
+  status InquiryStatus @default(NEW)
+  adminNote String? @db.Text @map("admin_note")
+  // 기획 단계 내용 — 문의를 보고 공연 기획을 정리하는 작성란. 전환 시 공연 기획 메모로 이관.
+  planningNote String? @db.Text @map("planning_note")
+  handledById String? @map("handled_by_id")
+  handledBy User? @relation("InquiryHandledBy", fields: [handledById], references: [id])
+  productionId String? @map("production_id")
+  production Production? @relation(fields: [productionId], references: [id])
+  planningMemos PlanningMemo[]
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([status, createdAt])
+  @@index([createdAt])
+  @@map("inquiries")
+}
+
+model PlanningMemo {
+  id String @id @default(uuid())
+  productionId String @map("production_id")
+  production Production @relation(fields: [productionId], references: [id])
+  authorId String @map("author_id")
+  author User @relation(fields: [authorId], references: [id])
+  body String @db.Text
+  inquiryId String? @map("inquiry_id")
+  inquiry Inquiry? @relation(fields: [inquiryId], references: [id])
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([productionId, createdAt])
+  @@map("planning_memos")
+}
+
+enum BoardCategory {
+  NOTICE
+  QUESTION
+  MATERIAL
+
+  @@map("board_category")
+}
+
+model BoardPost {
+  id String @id @default(uuid())
+  productionId String @map("production_id")
+  production Production @relation(fields: [productionId], references: [id])
+  authorId String @map("author_id")
+  author User @relation(fields: [authorId], references: [id])
+  category BoardCategory @default(QUESTION)
+  title String
+  body String @db.Text
+  pinned Boolean @default(false)
+  comments BoardComment[]
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([productionId, pinned, createdAt])
+  @@map("board_posts")
+}
+
+model BoardComment {
+  id String @id @default(uuid())
+  postId String @map("post_id")
+  post BoardPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  authorId String @map("author_id")
+  author User @relation(fields: [authorId], references: [id])
+  body String @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([postId, createdAt])
+  @@map("board_comments")
+}
+
+model CueTrack {
+  id String @id @default(uuid())
+  productionId String @map("production_id")
+  production Production @relation(fields: [productionId], references: [id])
+  name String
+  order Int @default(0)
+  ownerMembershipId String? @map("owner_membership_id")
+  ownerMembership Membership? @relation(fields: [ownerMembershipId], references: [id])
+  cues TrackCue[]
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([productionId, name])
+  @@index([productionId, order])
+  @@map("cue_tracks")
+}
+
+model TrackCue {
+  id String @id @default(uuid())
+  productionId String @map("production_id")
+  production Production @relation(fields: [productionId], references: [id])
+  trackId String @map("track_id")
+  track CueTrack @relation(fields: [trackId], references: [id], onDelete: Cascade)
+  sceneId String? @map("scene_id")
+  scene Scene? @relation(fields: [sceneId], references: [id])
+  cueNumber String @map("cue_number")
+  trigger String?
+  content String @db.Text
+  note String?
+  // 배우 큐의 인물 태그 — 인물별 보기/서브레인 (프롬프트북의 인물별 등퇴장 표기 관례)
+  characterId String? @map("character_id")
+  character Role? @relation(fields: [characterId], references: [id])
+  // 예상 소요 초 — QLab처럼 큐마다 duration을 두어 타임라인을 실제 시간에 가깝게 한다
+  durationSec Int? @map("duration_sec")
+  // 소프트 삭제(휴지통) — 큐 삭제·큐시트 초기화 시 실데이터는 남기고 감춘다. 복구 가능.
+  deletedAt DateTime? @map("deleted_at")
+  order Int @default(0)
+  authorId String @map("author_id")
+  author User @relation(fields: [authorId], references: [id])
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([productionId, trackId, order])
+  @@index([sceneId])
+  @@index([characterId])
+  @@map("track_cues")
+}
