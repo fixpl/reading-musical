@@ -62,13 +62,22 @@ export function validateEnvironment(config: EnvConfig) {
   );
   next.AUTH_EXPOSE_DEV_RESET_URL = normalizeBoolean(config.AUTH_EXPOSE_DEV_RESET_URL || "false", "AUTH_EXPOSE_DEV_RESET_URL");
   next.RATE_LIMIT_TRUST_PROXY = normalizeBoolean(config.RATE_LIMIT_TRUST_PROXY || "false", "RATE_LIMIT_TRUST_PROXY");
+  next.MAIL_TRANSPORT = normalizeMailTransport(config.MAIL_TRANSPORT || DEFAULT_MAIL_TRANSPORT, isProduction);
+  next.RESEND_API_KEY = config.RESEND_API_KEY?.trim();
+  next.RESEND_FROM_EMAIL = config.RESEND_FROM_EMAIL?.trim();
+  next.RESEND_REPLY_TO = config.RESEND_REPLY_TO?.trim();
   next.MAIL_HOST = (config.MAIL_HOST || DEFAULT_MAIL_HOST).trim();
   next.MAIL_PORT = normalizePort(config.MAIL_PORT || DEFAULT_MAIL_PORT);
-  next.MAIL_FROM = (config.MAIL_FROM || DEFAULT_MAIL_FROM).trim();
-  next.MAIL_TRANSPORT = normalizeMailTransport(config.MAIL_TRANSPORT || DEFAULT_MAIL_TRANSPORT, isProduction);
+  next.MAIL_FROM = (next.MAIL_TRANSPORT === "resend" ? next.RESEND_FROM_EMAIL : config.MAIL_FROM || DEFAULT_MAIL_FROM)?.trim();
   next.MAIL_SECURE = normalizeBoolean(config.MAIL_SECURE || "false", "MAIL_SECURE");
   next.MAIL_WORKER_BATCH_SIZE = normalizeInteger(config.MAIL_WORKER_BATCH_SIZE || "25", "MAIL_WORKER_BATCH_SIZE", 1, 100);
   next.MAIL_WORKER_INTERVAL_MS = normalizeInteger(config.MAIL_WORKER_INTERVAL_MS || "30000", "MAIL_WORKER_INTERVAL_MS", 1000, 86400000);
+  next.MAIL_WORKER_PROCESSING_TIMEOUT_MS = normalizeInteger(
+    config.MAIL_WORKER_PROCESSING_TIMEOUT_MS || "300000",
+    "MAIL_WORKER_PROCESSING_TIMEOUT_MS",
+    30000,
+    86400000
+  );
   next.MAIL_WORKER_RETRY_DELAY_MS = normalizeInteger(config.MAIL_WORKER_RETRY_DELAY_MS || "300000", "MAIL_WORKER_RETRY_DELAY_MS", 1000, 86400000);
   next.MAIL_WORKER_MAX_ATTEMPTS = normalizeInteger(config.MAIL_WORKER_MAX_ATTEMPTS || "3", "MAIL_WORKER_MAX_ATTEMPTS", 1, 10);
   next.MAIL_DIGEST_WINDOW_MS = normalizeInteger(config.MAIL_DIGEST_WINDOW_MS || "3600000", "MAIL_DIGEST_WINDOW_MS", 60000, 86400000);
@@ -87,7 +96,25 @@ export function validateEnvironment(config: EnvConfig) {
 
   requireEnv(next, "JWT_ACCESS_SECRET");
   requireEnv(next, "JWT_REFRESH_SECRET");
-  requireEnv(next, "MAIL_HOST");
+
+  if (next.MAIL_TRANSPORT === "smtp") {
+    requireEnv(next, "MAIL_HOST");
+  }
+  if (next.MAIL_TRANSPORT === "resend") {
+    if (!next.RESEND_API_KEY) {
+      throw new Error("RESEND_API_KEY is required when MAIL_TRANSPORT=resend.");
+    }
+    if (!next.RESEND_FROM_EMAIL) {
+      throw new Error("RESEND_FROM_EMAIL is required when MAIL_TRANSPORT=resend.");
+    }
+    assertEmailAddress("RESEND_FROM_EMAIL", next.RESEND_FROM_EMAIL);
+    if (next.RESEND_REPLY_TO) {
+      assertEmailAddress("RESEND_REPLY_TO", next.RESEND_REPLY_TO);
+    }
+    if (isProduction) {
+      assertResendCredential(next.RESEND_API_KEY);
+    }
+  }
   requireEnv(next, "MAIL_FROM");
 
   if (isProduction) {
@@ -135,6 +162,23 @@ function assertProductionSecret(key: string, value: string | undefined) {
   const normalized = secret.toLowerCase();
   if (secret.length < 32 || PRODUCTION_SECRET_PLACEHOLDERS.has(normalized) || normalized.includes("replace-with")) {
     throw new Error(`${key} must be a non-placeholder secret with at least 32 characters in production.`);
+  }
+}
+
+function assertResendCredential(value: string) {
+  const credential = value.trim();
+  const normalized = credential.toLowerCase();
+  if (!/^re_\S{20,}$/.test(credential) || normalized.includes("replace") || normalized.includes("placeholder")) {
+    throw new Error("RESEND_API_KEY must be a valid non-placeholder Resend credential in production.");
+  }
+}
+
+function assertEmailAddress(key: string, value: string) {
+  const trimmed = value.trim();
+  const displayNameMatch = trimmed.match(/^[^<>]+<([^<>]+)>$/);
+  const mailbox = displayNameMatch?.[1]?.trim() || trimmed;
+  if (!/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(mailbox)) {
+    throw new Error(`${key} must be a valid email address.`);
   }
 }
 
@@ -264,11 +308,11 @@ function normalizeBoolean(value: string, key: string) {
 
 function normalizeMailTransport(value: string, isProduction: boolean) {
   const normalized = value.trim().toLowerCase();
-  if (normalized !== "smtp" && normalized !== "json") {
-    throw new Error("MAIL_TRANSPORT must be smtp or json.");
+  if (normalized !== "smtp" && normalized !== "json" && normalized !== "resend") {
+    throw new Error("MAIL_TRANSPORT must be smtp, json, or resend.");
   }
-  if (isProduction && normalized !== "smtp") {
-    throw new Error("MAIL_TRANSPORT must be smtp in production.");
+  if (isProduction && normalized === "json") {
+    throw new Error("MAIL_TRANSPORT must be smtp or resend in production.");
   }
   return normalized;
 }

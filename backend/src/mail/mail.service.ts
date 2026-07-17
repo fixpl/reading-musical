@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { EmailDeliveryStatus, Prisma } from "@prisma/client";
 import nodemailer, { type Transporter } from "nodemailer";
 import { PrismaService } from "../prisma/prisma.service";
+import { sendResendEmail } from "./resend-mail.transport";
 
 export type QueueEmailInput = {
   toEmail: string;
@@ -179,6 +180,36 @@ export class MailService {
     const maxAttempts = this.clampedNumber(options.maxAttempts ?? this.numberConfig("MAIL_WORKER_MAX_ATTEMPTS", 3), 1, 10);
     const retryDelayMs = this.clampedNumber(options.retryDelayMs ?? this.numberConfig("MAIL_WORKER_RETRY_DELAY_MS", 300000), 1000, 86400000);
     const now = new Date();
+    const processingTimeoutMs = this.clampedNumber(
+      this.numberConfig("MAIL_WORKER_PROCESSING_TIMEOUT_MS", 300000),
+      30000,
+      86400000
+    );
+    const staleBefore = new Date(now.getTime() - processingTimeoutMs);
+    await this.prisma.emailDelivery.updateMany({
+      where: {
+        status: EmailDeliveryStatus.PROCESSING,
+        attempts: { gte: maxAttempts },
+        lastAttemptAt: { lte: staleBefore }
+      },
+      data: {
+        status: EmailDeliveryStatus.FAILED,
+        errorMessage: "Mail worker stopped before completing the final attempt.",
+        nextAttemptAt: null
+      }
+    });
+    await this.prisma.emailDelivery.updateMany({
+      where: {
+        status: EmailDeliveryStatus.PROCESSING,
+        attempts: { lt: maxAttempts },
+        lastAttemptAt: { lte: staleBefore }
+      },
+      data: {
+        status: EmailDeliveryStatus.QUEUED,
+        errorMessage: "Recovered after an interrupted mail worker attempt.",
+        nextAttemptAt: now
+      }
+    });
     const deliveries = await this.prisma.emailDelivery.findMany({
       where: {
         status: EmailDeliveryStatus.QUEUED,
@@ -257,6 +288,23 @@ export class MailService {
   }
 
   private async sendDelivery(delivery: QueuedEmailDelivery) {
+    const transport = (this.config.get<string>("MAIL_TRANSPORT") || "smtp").trim().toLowerCase();
+    if (transport === "resend") {
+      return sendResendEmail({
+        credential: this.requiredConfig("RESEND_API_KEY"),
+        idempotencyKey: `email-delivery/${delivery.id}`,
+        from: this.requiredConfig("RESEND_FROM_EMAIL"),
+        replyTo: this.config.get<string>("RESEND_REPLY_TO")?.trim() || undefined,
+        to: delivery.toEmail,
+        subject: delivery.subject,
+        text: delivery.bodyText,
+        headers: {
+          "X-Reading-Musical-Template": delivery.templateKey,
+          "X-Reading-Musical-Delivery": delivery.id
+        }
+      });
+    }
+
     return this.getTransporter().sendMail({
       from: this.fromEmail(),
       to: delivery.toEmail,
@@ -307,6 +355,12 @@ export class MailService {
     const value = this.config.get<string | boolean>(key);
     if (value === undefined) return fallback;
     return String(value).toLowerCase() === "true";
+  }
+
+  private requiredConfig(key: string) {
+    const value = this.config.get<string>(key)?.trim();
+    if (!value) throw new Error(`${key} is required.`);
+    return value;
   }
 
   private clampedNumber(value: number, min: number, max: number) {
