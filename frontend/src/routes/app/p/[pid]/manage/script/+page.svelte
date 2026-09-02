@@ -802,7 +802,7 @@
       <div class="grid gap-3">
         <div class="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
           <span>막 {importPreview.detectedActs} · 장 {importPreview.detectedScenes} · 블록 {reviewedBlocks.length}</span>
-          {#each importPreview.warnings as warning (warning.code)}
+          {#each importPreview.warnings as warning, index (index)}
             <span class="text-amber-600">{warning.message}</span>
           {/each}
         </div>
