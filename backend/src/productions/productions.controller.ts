@@ -16,6 +16,7 @@ import {
   PutStaffAssignmentsDto,
   ReplacePositionRequirementsDto,
   SearchProductionQueryDto,
+  SetBackgroundVideoDto,
   UpdateMemberDto,
   UpdatePositionRequirementDto,
   UpdateProductionDto
@@ -108,6 +109,13 @@ export class ProductionsController {
   @ProductionRoles("PRODUCER")
   deletePosition(@Param("id") id: string, @Param("positionId") positionId: string, @CurrentUser() user: RequestUser) {
     return this.productionsService.deletePositionRequirement(id, positionId, user);
+  }
+
+  @Patch(":id/background-video")
+  @PlatformRoles("SUPER_ADMIN", "ORG_ADMIN")
+  @ProductionRoles("PRODUCER", "DIRECTOR", "STAGE_MANAGER")
+  setBackgroundVideo(@Param("id") id: string, @Body() dto: SetBackgroundVideoDto, @CurrentUser() user: RequestUser) {
+    return this.productionsService.setBackgroundVideo(id, dto, user);
   }
 
   @Patch(":id")

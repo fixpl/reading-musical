@@ -75,6 +75,11 @@ export class CreateTrackCueDto {
   @Min(1)
   @Max(3600)
   durationSec?: number | null;
+
+  @ApiPropertyOptional({ description: "첨부 미디어(영상·음원) Asset ID" })
+  @IsOptional()
+  @IsUUID()
+  assetId?: string | null;
 }
 
 export class UpdateTrackCueDto {
@@ -119,6 +124,11 @@ export class UpdateTrackCueDto {
   @Min(1)
   @Max(3600)
   durationSec?: number | null;
+
+  @ApiPropertyOptional({ description: "첨부 미디어(영상·음원) Asset ID — null이면 해제" })
+  @IsOptional()
+  @IsUUID()
+  assetId?: string | null;
 }
 
 export class ReorderTrackCueDto {

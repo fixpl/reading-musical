@@ -280,6 +280,13 @@ export class CreateInvitationDto {
   role!: ProductionRole;
 }
 
+export class SetBackgroundVideoDto {
+  @ApiPropertyOptional({ description: "배경 영상 Asset ID — null이면 해제" })
+  @IsOptional()
+  @IsUUID()
+  assetId?: string | null;
+}
+
 export class SearchProductionQueryDto {
   @ApiPropertyOptional({ description: "검색어. 2자 미만이면 빈 결과를 반환한다." })
   @IsOptional()

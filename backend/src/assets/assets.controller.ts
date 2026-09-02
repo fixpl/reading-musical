@@ -19,6 +19,14 @@ export class AssetsController {
     return this.assetsService.createAsset(dto, user);
   }
 
+  @Get()
+  listProductionMedia(@Query("productionId") productionId: string | undefined, @CurrentUser() user: RequestUser) {
+    if (!productionId) {
+      return [];
+    }
+    return this.assetsService.listProductionMedia(productionId, user);
+  }
+
   @Get(":assetId/url")
   getSignedUrl(@Param("assetId") assetId: string, @CurrentUser() user: RequestUser) {
     return this.assetsService.getSignedUrl(assetId, user);

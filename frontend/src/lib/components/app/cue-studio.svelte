@@ -32,6 +32,8 @@
     type: "DIALOGUE" | "LYRIC" | "STAGE_DIRECTION" | "NOTE" | string;
     text: string;
     order: number;
+    startMs?: number | null;
+    durationMs?: number | null;
     character: { id: string; name: string } | null;
   };
   type Scene = {
@@ -43,28 +45,39 @@
     blocks?: ScriptBlock[];
   };
 
+  type BackgroundVideo = {
+    url: string;
+    mime: string;
+  };
+
   let {
     scenes,
     tracks,
     cues,
     editableTrackIds = [],
+    background = null,
+    canEditScript = false,
     onEditCue,
     onAddCue,
     onOpenScript,
     onDeleteCue,
     onResizeCue,
-    onReorderCue
+    onReorderCue,
+    onMoveBlock
   }: {
     scenes: Scene[];
     tracks: Track[];
     cues: Cue[];
     editableTrackIds?: string[];
+    background?: BackgroundVideo | null;
+    canEditScript?: boolean;
     onEditCue?: (cueId: string) => void;
     onAddCue?: (trackId: string, sceneId: string | null) => void;
     onOpenScript?: (sceneId: string | null) => void;
     onDeleteCue?: (cueId: string) => void;
     onResizeCue?: (cueId: string, durationSec: number) => void;
     onReorderCue?: (cueId: string, sceneId: string | null, orderedTrackCueIds: string[]) => void;
+    onMoveBlock?: (blockId: string, startMs: number | null, durationMs: number | null) => void;
   } = $props();
 
   // 목업(큐시트 스튜디오)의 부서 팔레트 — 표준 트랙은 고정색, 나머지는 순환
@@ -148,7 +161,56 @@
     return list;
   });
 
-  const total = $derived(segments.reduce((sum, seg) => sum + seg.dur, 0));
+  const segmentsTotal = $derived(segments.reduce((sum, seg) => sum + seg.dur, 0));
+
+  // ── 대본 블록 타임라인 — 블록마다 시작/길이(ms)를 명시하면 배경 영상 기준 그 시각에 놓인다.
+  // 미지정 블록은 앞 블록 끝에 이어붙이는 자동 흐름 배치(점선으로 표시).
+  const DEFAULT_BLOCK_MS = 8000;
+  const BLOCK_COLORS: Record<string, string> = {
+    DIALOGUE: "#2563eb",
+    LYRIC: "#d97706",
+    STAGE_DIRECTION: "#6b7280",
+    NOTE: "#7c3aed"
+  };
+
+  type BlockClip = {
+    block: ScriptBlock;
+    sceneTitle: string;
+    actTitle: string;
+    startMs: number;
+    durationMs: number;
+    timed: boolean;
+  };
+
+  // 드래그·리사이즈 중인 블록은 미리보기 값을 쓴다(놓을 때 저장).
+  let blockResizePreview = $state<{ id: string; ms: number } | null>(null);
+
+  const blockClips = $derived.by<BlockClip[]>(() => {
+    const list: BlockClip[] = [];
+    let cursorMs = 0;
+    for (const scene of scenes) {
+      for (const block of scene.blocks ?? []) {
+        const timed = block.startMs != null;
+        const startMs = timed ? block.startMs! : cursorMs;
+        const durationMs =
+          blockResizePreview?.id === block.id ? blockResizePreview.ms : (block.durationMs ?? DEFAULT_BLOCK_MS);
+        list.push({ block, sceneTitle: scene.title, actTitle: scene.act.title, startMs, durationMs, timed });
+        cursorMs = Math.max(cursorMs, startMs + durationMs);
+      }
+    }
+    return list;
+  });
+
+  const blockEndMin = $derived(blockClips.reduce((end, clip) => Math.max(end, (clip.startMs + clip.durationMs) / 60000), 0));
+
+  // ── 배경 영상 — 연결되면 영상이 재생의 기준 시계가 된다(실시간 고정).
+  let videoEl = $state<HTMLVideoElement | null>(null);
+  let videoDurationSec = $state<number | null>(null);
+  let videoMuted = $state(true);
+
+  const total = $derived(
+    Math.max(segmentsTotal, blockEndMin, background && videoDurationSec ? videoDurationSec / 60 : 0)
+  );
 
   const actBands = $derived.by(() => {
     const bands: Array<{ actId: string; title: string; start: number; end: number }> = [];
@@ -166,6 +228,10 @@
   let speed = $state(20);
   let role = $state("all"); // "all" | trackId
   let selectedCueId = $state<string | null>(null);
+  // 대본 레인에서 선택한 블록 — 인스펙터에서 시작/길이를 직접 고칠 수 있다.
+  let selectedBlockId = $state<string | null>(null);
+  let blockStartSec = $state("");
+  let blockDurSec = $state("");
   let fullScriptSceneId = $state<string | null>(null);
   // 발표(진행) 모드 — PPT 슬라이드 쇼처럼 전체 화면으로 크게 보면서 재생만 한다.
   let presenting = $state(false);
@@ -183,7 +249,23 @@
   const currentSeg = $derived(segments.reduce((cur, seg) => (time >= seg.start ? seg : cur), segments[0]));
   const selectedCue = $derived(selectedCueId ? (cues.find((cue) => cue.id === selectedCueId) ?? null) : null);
   const selectedTrack = $derived(selectedCue ? (tracks.find((track) => track.id === selectedCue.trackId) ?? null) : null);
+  const selectedBlockClip = $derived(
+    selectedBlockId ? (blockClips.find((clip) => clip.block.id === selectedBlockId) ?? null) : null
+  );
   const editableSet = $derived(new Set(editableTrackIds));
+
+  // 배경 영상이 연결되면 영상 시간이 곧 타임라인 시간이라 배속은 실시간으로 고정한다.
+  $effect(() => {
+    if (background && speed !== 1) speed = 1;
+  });
+
+  // 선택한 블록의 현재 타이밍을 편집 폼에 채운다.
+  $effect(() => {
+    if (selectedBlockClip) {
+      blockStartSec = String(Math.round(selectedBlockClip.startMs / 100) / 10);
+      blockDurSec = String(Math.round(selectedBlockClip.durationMs / 100) / 10);
+    }
+  });
 
   const fmt = (m: number) => {
     const s = Math.max(0, Math.round(m * 60));
@@ -280,10 +362,29 @@
   }
 
   // ── 재생 — 탭이 가려져도 진행되도록 rAF 대신 interval 시계를 쓴다 ──
+  // 배경 영상이 있으면 영상이 기준 시계: 재생/정지·시킹을 영상과 맞추고 시간은 영상에서 읽는다.
   function setPlaying(next: boolean) {
     playing = next;
     if (next) {
       if (time >= total) time = 0;
+      if (background && videoEl) {
+        videoEl.currentTime = Math.min(time * 60, Math.max(0, (videoDurationSec ?? time * 60) - 0.05));
+        videoEl.playbackRate = 1;
+        void videoEl.play().catch(() => {
+          setPlaying(false);
+        });
+        timer = setInterval(() => {
+          if (!videoEl) return;
+          time = videoEl.currentTime / 60;
+          if (videoEl.ended || time >= total) {
+            time = Math.min(time, total);
+            setPlaying(false);
+            return;
+          }
+          scrollToPlayhead();
+        }, 100);
+        return;
+      }
       lastWall = Date.now();
       timer = setInterval(() => {
         const now = Date.now();
@@ -296,9 +397,12 @@
         }
         scrollToPlayhead();
       }, 100);
-    } else if (timer) {
-      clearInterval(timer);
-      timer = null;
+    } else {
+      videoEl?.pause();
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
     }
   }
 
@@ -320,7 +424,11 @@
     const rect = inner.getBoundingClientRect();
     const x = event.clientX - rect.left - LABEL_W;
     time = Math.min(total, Math.max(0, x / PXM));
+    if (background && videoEl) {
+      videoEl.currentTime = time * 60;
+    }
     selectedCueId = null;
+    selectedBlockId = null;
   }
   function scrubDown(event: PointerEvent) {
     scrubbing = true;
@@ -343,10 +451,100 @@
 
   function pickCue(cue: Cue, seg: Segment) {
     selectedCueId = cue.id;
+    selectedBlockId = null;
     const clip = clipsFor(cue.trackId, seg).find((item) => item.cue.id === cue.id);
     time = clip ? clip.left / PXM + 0.001 : seg.start + 0.001;
     setPlaying(false);
     scrollToPlayhead();
+  }
+
+  // ── 대본 블록 선택·드래그·리사이즈 — 영상 편집기처럼 블록을 끌어 배치를 바꾼다 ──
+  function pickBlock(clip: BlockClip) {
+    selectedBlockId = clip.block.id;
+    selectedCueId = null;
+    time = clip.startMs / 60000 + 0.001;
+    if (background && videoEl) {
+      videoEl.currentTime = time * 60;
+    }
+    setPlaying(false);
+    scrollToPlayhead();
+  }
+
+  const canEditBlocks = $derived(canEditScript && !!onMoveBlock);
+
+  let blockDrag = $state<{ blockId: string; startX: number; dx: number; leftMs: number; moved: boolean } | null>(null);
+
+  function blockDragStart(event: PointerEvent, clip: BlockClip) {
+    if (!canEditBlocks) return;
+    blockDrag = { blockId: clip.block.id, startX: event.clientX, dx: 0, leftMs: clip.startMs, moved: false };
+    try {
+      (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+    } catch {
+      /* capture 불가 환경 무시 */
+    }
+  }
+  function blockDragMove(event: PointerEvent) {
+    if (!blockDrag) return;
+    const dx = event.clientX - blockDrag.startX;
+    blockDrag = { ...blockDrag, dx, moved: blockDrag.moved || Math.abs(dx) > 3 };
+  }
+  function blockDragEnd(event: PointerEvent, clip: BlockClip) {
+    if (!blockDrag) return;
+    (event.currentTarget as HTMLElement).releasePointerCapture?.(event.pointerId);
+    const d = blockDrag;
+    blockDrag = null;
+    if (!d.moved) {
+      pickBlock(clip); // 거의 안 움직였으면 클릭(선택)
+      return;
+    }
+    const startMs = Math.max(0, Math.round((d.leftMs + (d.dx * 60000) / PXM) / 500) * 500); // 0.5초 스냅
+    onMoveBlock?.(d.blockId, startMs, clip.durationMs);
+  }
+
+  let blockResizing: { blockId: string; startX: number; startMs: number } | null = null;
+
+  function blockResizeStart(event: PointerEvent, clip: BlockClip) {
+    if (!canEditBlocks) return;
+    event.stopPropagation();
+    event.preventDefault();
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    blockResizing = { blockId: clip.block.id, startX: event.clientX, startMs: clip.durationMs };
+    blockResizePreview = { id: clip.block.id, ms: clip.durationMs };
+  }
+  function blockResizeMove(event: PointerEvent) {
+    if (!blockResizing) return;
+    const dMs = ((event.clientX - blockResizing.startX) * 60000) / PXM;
+    const ms = Math.round(Math.min(3600_000, Math.max(1000, blockResizing.startMs + dMs)) / 500) * 500;
+    blockResizePreview = { id: blockResizing.blockId, ms };
+  }
+  function blockResizeEnd(event: PointerEvent, clip: BlockClip) {
+    if (!blockResizing) return;
+    (event.currentTarget as HTMLElement).releasePointerCapture?.(event.pointerId);
+    const ms = blockResizePreview?.ms ?? null;
+    const changed = ms != null && ms !== blockResizing.startMs;
+    const blockId = blockResizing.blockId;
+    blockResizing = null;
+    blockResizePreview = null;
+    if (changed && ms != null) {
+      // 시작이 자동(미지정)이면 현재 보이는 시작을 명시값으로 함께 고정한다.
+      const startMs = clip.block.startMs ?? clip.startMs;
+      onMoveBlock?.(blockId, startMs, ms);
+    }
+  }
+
+  function saveBlockTiming() {
+    if (!selectedBlockClip) return;
+    const start = Number.parseFloat(blockStartSec);
+    const dur = Number.parseFloat(blockDurSec);
+    if (!Number.isFinite(start) || start < 0) return;
+    const startMs = Math.round(start * 1000);
+    const durationMs = Number.isFinite(dur) && dur >= 1 ? Math.round(dur * 1000) : selectedBlockClip.durationMs;
+    onMoveBlock?.(selectedBlockClip.block.id, startMs, durationMs);
+  }
+
+  function clearBlockTiming() {
+    if (!selectedBlockClip) return;
+    onMoveBlock?.(selectedBlockClip.block.id, null, null);
   }
 
   // 영상 편집기처럼 — 빈 레인을 누르면 그 위치의 장면·트랙에 새 큐를 만든다.
@@ -472,6 +670,7 @@
 
   onDestroy(() => {
     if (timer) clearInterval(timer);
+    videoEl?.pause();
   });
 
   const ticks = $derived.by(() => {
@@ -566,6 +765,27 @@
             class="pointer-events-none absolute inset-0"
             style="background:radial-gradient(ellipse 75% 60% at 50% 8%, rgba(251,191,36,.14), transparent 65%);"
           ></div>
+          {#if background}
+            <!-- 뒷배경 영상 — 스테이지 뒤에 깔리며 타임라인 재생의 기준 시계가 된다 -->
+            <video
+              bind:this={videoEl}
+              class="pointer-events-none absolute inset-0 h-full w-full object-cover opacity-50"
+              src={background.url}
+              muted={videoMuted}
+              playsinline
+              preload="auto"
+              onloadedmetadata={() =>
+                (videoDurationSec = videoEl && Number.isFinite(videoEl.duration) ? videoEl.duration : null)}
+              onended={() => setPlaying(false)}
+            ></video>
+            <button
+              type="button"
+              class="absolute top-3 right-3 z-10 rounded-md bg-black/55 px-2.5 py-1 text-[11px] font-semibold text-zinc-100 transition-colors hover:bg-black/75"
+              onclick={() => (videoMuted = !videoMuted)}
+            >
+              {videoMuted ? "🔇 배경 영상" : "🔊 배경 영상"}
+            </button>
+          {/if}
           <p class="text-primary relative text-[11.5px] font-bold tracking-[0.14em] uppercase">
             {currentSeg?.actTitle || "큐시트"}
           </p>
@@ -641,12 +861,15 @@
       <!-- 인스펙터 -->
       <section class="bg-card flex flex-col overflow-hidden rounded-xl border">
         <div class="text-muted-foreground flex items-center border-b px-3 py-2 text-[11px] font-bold tracking-wider uppercase">
-          {selectedCue ? "큐 상세" : role === "all" ? "현재 장면 — 트랙별 큐" : "현재 장면 — 내 큐 우선"}
-          {#if selectedCue}
+          {selectedBlockClip ? "대본 블록" : selectedCue ? "큐 상세" : role === "all" ? "현재 장면 — 트랙별 큐" : "현재 장면 — 내 큐 우선"}
+          {#if selectedCue || selectedBlockClip}
             <button
               type="button"
               class="text-muted-foreground hover:text-foreground ms-auto rounded p-0.5"
-              onclick={() => (selectedCueId = null)}
+              onclick={() => {
+                selectedCueId = null;
+                selectedBlockId = null;
+              }}
               aria-label="닫기"
             >
               <XIcon class="size-3.5" />
@@ -654,7 +877,89 @@
           {/if}
         </div>
         <div class="max-h-[430px] overflow-y-auto">
-          {#if selectedCue && selectedTrack}
+          {#if selectedBlockClip}
+            {@const bColor = BLOCK_COLORS[selectedBlockClip.block.type] ?? "#0891b2"}
+            <div class="flex flex-col gap-3 p-3.5">
+              <div class="flex items-center gap-2">
+                <span
+                  class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold"
+                  style={`background:color-mix(in srgb, ${bColor} 16%, transparent);color:${bColor};`}
+                >
+                  <span class="size-2 rounded-[3px]" style={`background:${bColor};`}></span>
+                  {selectedBlockClip.block.type === "DIALOGUE"
+                    ? "대사"
+                    : selectedBlockClip.block.type === "LYRIC"
+                      ? "가사"
+                      : selectedBlockClip.block.type === "STAGE_DIRECTION"
+                        ? "지문"
+                        : "메모"}
+                </span>
+                <span class="text-muted-foreground text-xs">
+                  {selectedBlockClip.actTitle} · {selectedBlockClip.sceneTitle}
+                </span>
+              </div>
+              <div>
+                <p class="text-muted-foreground/70 text-[11px] font-bold tracking-wider uppercase">내용</p>
+                <p class="mt-0.5 text-[13.5px] leading-relaxed">
+                  {#if selectedBlockClip.block.character}
+                    <span class="me-1 font-bold" style={`color:${bColor};`}>{selectedBlockClip.block.character.name}</span>
+                  {/if}
+                  {selectedBlockClip.block.text}
+                </p>
+              </div>
+              <div>
+                <p class="text-muted-foreground/70 text-[11px] font-bold tracking-wider uppercase">타임라인 배치</p>
+                {#if canEditBlocks}
+                  <div class="mt-1.5 grid grid-cols-2 gap-2">
+                    <label class="grid gap-1 text-xs">
+                      <span class="text-muted-foreground">시작 (초)</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.5"
+                        class="border-input bg-background rounded-md border px-2 py-1.5 font-mono text-[13px]"
+                        bind:value={blockStartSec}
+                      />
+                    </label>
+                    <label class="grid gap-1 text-xs">
+                      <span class="text-muted-foreground">길이 (초)</span>
+                      <input
+                        type="number"
+                        min="1"
+                        step="0.5"
+                        class="border-input bg-background rounded-md border px-2 py-1.5 font-mono text-[13px]"
+                        bind:value={blockDurSec}
+                      />
+                    </label>
+                  </div>
+                  <div class="mt-2 flex gap-2">
+                    <button
+                      type="button"
+                      class="bg-primary text-primary-foreground hover:bg-primary/90 inline-flex flex-1 items-center justify-center rounded-lg px-3 py-2 text-sm font-semibold transition-colors"
+                      onclick={saveBlockTiming}
+                    >
+                      저장
+                    </button>
+                    {#if selectedBlockClip.timed}
+                      <button
+                        type="button"
+                        class="border-input hover:bg-accent inline-flex items-center justify-center rounded-lg border px-3 py-2 text-sm font-semibold transition-colors"
+                        title="명시한 시간을 지우고 자동 흐름 배치로 되돌립니다"
+                        onclick={clearBlockTiming}
+                      >
+                        자동 배치로
+                      </button>
+                    {/if}
+                  </div>
+                {:else}
+                  <p class="text-muted-foreground mt-0.5 font-mono text-[13px]">
+                    {fmt(selectedBlockClip.startMs / 60000)} · {fmt(selectedBlockClip.durationMs / 60000)}
+                    {selectedBlockClip.timed ? "" : " (자동 배치)"}
+                  </p>
+                {/if}
+              </div>
+            </div>
+          {:else if selectedCue && selectedTrack}
             {@const color = trackColor.get(selectedTrack.id)}
             <div class="flex flex-col gap-3 p-3.5">
               <div class="flex items-center gap-2">
@@ -827,13 +1132,14 @@
         <span class="font-mono text-[13px] tabular-nums">
           {fmt(time)} <span class="text-muted-foreground/60">/ {fmt(total)}</span>
         </span>
-        <div class="bg-muted flex rounded-lg p-0.5">
+        <div class="bg-muted flex rounded-lg p-0.5" title={background ? "배경 영상 연동 중에는 실시간만 지원합니다" : undefined}>
           {#each [1, 20, 60] as s (s)}
             <button
               type="button"
               class="rounded-md px-2 py-0.5 text-[11.5px] font-medium {speed === s
                 ? 'bg-background shadow-sm'
-                : 'text-muted-foreground hover:text-foreground'}"
+                : 'text-muted-foreground hover:text-foreground'} {background && s !== 1 ? 'cursor-not-allowed opacity-35' : ''}"
+              disabled={!!background && s !== 1}
               onclick={() => (speed = s)}
             >
               {s === 1 ? "실시간" : `×${s}`}
@@ -841,7 +1147,7 @@
           {/each}
         </div>
         <span class="text-muted-foreground/60 ms-auto hidden text-[11.5px] xl:block">
-          눈금 드래그로 이동 · 스페이스로 재생 · 큐 블록 클릭으로 상세
+          눈금 드래그로 이동 · 스페이스로 재생 · 큐 블록 클릭으로 상세{background ? " · 배경 영상 연동 중" : ""}
         </span>
       </div>
 
@@ -906,6 +1212,57 @@
               {/each}
             </div>
           </div>
+
+          <!-- 대본 블록 레인 — 대본이 타임라인에서 언제 보이는지. 끌어서 옮기고 끝을 끌어 길이 조절 -->
+          {#if blockClips.length > 0}
+            <div class="grid border-t" style={`grid-template-columns:${LABEL_W}px 1fr;`}>
+              <div class="bg-card text-muted-foreground sticky left-0 z-10 flex items-center border-e px-2.5 text-[11.5px] font-bold">
+                대본
+              </div>
+              <div class="relative h-[32px]" style={`width:${total * PXM}px;`}>
+                {#each blockClips as clip (clip.block.id)}
+                  {@const color = BLOCK_COLORS[clip.block.type] ?? "#0891b2"}
+                  {@const selected = selectedBlockId === clip.block.id}
+                  {@const dragging = blockDrag?.blockId === clip.block.id}
+                  {@const onAir = time * 60000 >= clip.startMs && time * 60000 < clip.startMs + clip.durationMs}
+                  <button
+                    type="button"
+                    class="absolute inset-y-[3px] flex items-center gap-1 overflow-hidden rounded-md border px-1.5 text-[10.5px] whitespace-nowrap
+                      {canEditBlocks ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'}
+                      {selected ? 'outline-2 outline-offset-1' : ''}
+                      {clip.timed ? '' : 'border-dashed opacity-75'}"
+                    style={`left:${(clip.startMs / 60000) * PXM}px;width:${Math.max(18, (clip.durationMs / 60000) * PXM - 2)}px;
+                      ${canEditBlocks ? "touch-action:none;" : ""}
+                      transform:translateX(${dragging ? blockDrag!.dx : 0}px);${dragging ? "z-index:30;opacity:.85;" : ""}
+                      border-color:color-mix(in srgb, ${color} ${onAir || selected ? "100" : "55"}%, transparent);
+                      background:color-mix(in srgb, ${color} ${onAir ? "34" : "14"}%, var(--card));
+                      ${selected ? `outline-color:${color};` : ""}`}
+                    title={`${clip.actTitle} · ${clip.sceneTitle} — ${clip.block.text.slice(0, 60)}${clip.timed ? "" : " (자동 배치)"}`}
+                    onclick={canEditBlocks ? undefined : () => pickBlock(clip)}
+                    onpointerdown={canEditBlocks ? (e) => blockDragStart(e, clip) : undefined}
+                    onpointermove={canEditBlocks ? blockDragMove : undefined}
+                    onpointerup={canEditBlocks ? (e) => blockDragEnd(e, clip) : undefined}
+                  >
+                    {#if clip.block.character}
+                      <span class="shrink-0 text-[10px] font-bold" style={`color:${color};`}>{clip.block.character.name}</span>
+                    {/if}
+                    <span class="text-muted-foreground truncate">{clip.block.text}</span>
+                    {#if canEditBlocks}
+                      <!-- svelte-ignore a11y_no_static_element_interactions -->
+                      <span
+                        class="absolute inset-y-0 right-0 z-10 w-2 cursor-ew-resize rounded-e-md hover:bg-white/25"
+                        style="touch-action:none;"
+                        title="끌어서 길이 조절"
+                        onpointerdown={(e) => blockResizeStart(e, clip)}
+                        onpointermove={blockResizeMove}
+                        onpointerup={(e) => blockResizeEnd(e, clip)}
+                      ></span>
+                    {/if}
+                  </button>
+                {/each}
+              </div>
+            </div>
+          {/if}
 
           <!-- 트랙 레인 -->
           {#each tracks as track (track.id)}
@@ -1058,8 +1415,8 @@
       상단 트랙 버튼은 큐 선택이 아니라 강조 필터입니다 · 위치는 저장된 큐 순서와 예상 길이를 바탕으로 한 배치이며 절대 타임코드는 아닙니다<br class="hidden sm:block" />
       짧은 큐는 겹치지 않도록 최소 30초 칸으로 표시합니다 ·
       미입력 큐는 30초로 계산하며 트랙 담당자는 자기 큐만 수정할 수 있습니다{onAddCue
-        ? " · 빈 레인을 누르면 그 장면에 큐가 추가됩니다"
-        : ""}
+        ? " · 빈 레인을 클릭하면 그 장면에 큐가 추가됩니다"
+        : ""}{canEditBlocks ? " · 대본 레인의 블록은 끌어서 옮기고 끝을 끌어 길이를 조절합니다" : ""}
     </p>
   </div>
 

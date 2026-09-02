@@ -10,7 +10,7 @@
   import { Label } from "$lib/components/ui/label";
   import { Skeleton } from "$lib/components/ui/skeleton";
   import { Textarea } from "$lib/components/ui/textarea";
-  import { apiRequest, streamNdjson, uploadForm, type StreamEvent } from "$lib/api/client";
+  import { apiRequest, streamNdjson, uploadForm, uploadSignedObject, type StreamEvent } from "$lib/api/client";
   import CueStudio from "$lib/components/app/cue-studio.svelte";
   import ChevronLeftIcon from "@lucide/svelte/icons/chevron-left";
   import PlusIcon from "@lucide/svelte/icons/plus";
@@ -25,6 +25,27 @@
     ownerMembership: { id: string; user: { id: string; name: string } } | null;
   };
 
+  type MediaAsset = {
+    id: string;
+    kind: string;
+    mime: string;
+    sizeBytes: number;
+    storageKey: string;
+    createdAt: string;
+  };
+
+  type CueAsset = { id: string; kind: string; mime: string; storageKey: string };
+
+  type ScriptBlock = {
+    id: string;
+    type: string;
+    text: string;
+    order: number;
+    startMs?: number | null;
+    durationMs?: number | null;
+    character: { id: string; name: string } | null;
+  };
+
   type Cue = {
     id: string;
     trackId: string;
@@ -36,6 +57,7 @@
     scene: { id: string; title: string; order: number; act: { id: string; title: string; order: number } } | null;
     character: { id: string; name: string } | null;
     durationSec: number | null;
+    asset?: CueAsset | null;
     author: { id: string; name: string };
   };
 
@@ -47,10 +69,16 @@
     order: number;
     summary?: string | null;
     act: { id: string; title: string; order: number };
+    blocks?: ScriptBlock[];
   };
 
   type Board = {
-    production: { id: string; title: string };
+    production: {
+      id: string;
+      title: string;
+      backgroundAssetId?: string | null;
+      backgroundAsset?: (CueAsset & { sizeBytes: number }) | null;
+    };
     tracks: Track[];
     cues: Cue[];
     scenes: Scene[];
@@ -96,8 +124,21 @@
   let formNote = $state("");
   let formCharacterId = $state("");
   let formDurationSec = $state(""); // 문자열로 두고 저장 시 정수 변환
+  let formAssetId = $state("");
   let cueSaving = $state(false);
   let castingRoles = $state<CastingRole[]>([]);
+
+  // 미디어(영상·음원) 라이브러리 + 배경 영상
+  let mediaAssets = $state<MediaAsset[]>([]);
+  let backgroundVideo = $state<{ url: string; mime: string } | null>(null);
+  let mediaUploading = $state(false);
+  let backgroundUploading = $state(false);
+
+  // storageKey = "prefix/productionId/uuid-파일명" — 화면에는 파일명만 보여준다.
+  function mediaName(asset: { storageKey: string }) {
+    const base = asset.storageKey.split("/").pop() ?? asset.storageKey;
+    return base.replace(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-/, "");
+  }
 
   const DURATION_PRESETS = [
     { label: "15초", value: 15 },
@@ -177,10 +218,107 @@
       title = result.production.title;
       board = result;
       castingRoles = await apiRequest<CastingRole[]>(`/productions/${pid}/roles`).catch(() => []);
+      mediaAssets = await apiRequest<MediaAsset[]>(`/assets?productionId=${pid}`).catch(() => []);
+      if (result.production.backgroundAsset) {
+        const signed = await apiRequest<{ url: string; mime: string }>(
+          `/assets/${result.production.backgroundAsset.id}/url`
+        ).catch(() => null);
+        backgroundVideo = signed ? { url: signed.url, mime: signed.mime } : null;
+      } else {
+        backgroundVideo = null;
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "큐시트를 불러오지 못했습니다");
     } finally {
       loading = false;
+    }
+  }
+
+  type AssetCreateResponse = {
+    asset: { id: string };
+    upload: { url: string; method?: string };
+  };
+
+  async function uploadMediaFile(file: File, purpose: "BACKGROUND_VIDEO" | "CUE_MEDIA") {
+    const created = await apiRequest<AssetCreateResponse>("/assets", {
+      method: "POST",
+      body: JSON.stringify({
+        purpose,
+        productionId: pid,
+        fileName: file.name,
+        mimeType: file.type,
+        size: file.size
+      })
+    });
+    await uploadSignedObject(created.upload, file, file.type);
+    return created.asset;
+  }
+
+  async function onPickBackground(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file) return;
+    backgroundUploading = true;
+    try {
+      const asset = await uploadMediaFile(file, "BACKGROUND_VIDEO");
+      await apiRequest(`/productions/${pid}/background-video`, {
+        method: "PATCH",
+        body: JSON.stringify({ assetId: asset.id })
+      });
+      toast.success("배경 영상을 등록했습니다. 타임라인 재생이 영상에 맞춰집니다.");
+      await load();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "배경 영상을 올리지 못했습니다");
+    } finally {
+      backgroundUploading = false;
+    }
+  }
+
+  async function clearBackground() {
+    backgroundUploading = true;
+    try {
+      await apiRequest(`/productions/${pid}/background-video`, {
+        method: "PATCH",
+        body: JSON.stringify({ assetId: null })
+      });
+      toast.success("배경 영상을 해제했습니다");
+      await load();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "해제하지 못했습니다");
+    } finally {
+      backgroundUploading = false;
+    }
+  }
+
+  async function onPickCueMedia(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file) return;
+    mediaUploading = true;
+    try {
+      const asset = await uploadMediaFile(file, "CUE_MEDIA");
+      mediaAssets = await apiRequest<MediaAsset[]>(`/assets?productionId=${pid}`).catch(() => mediaAssets);
+      formAssetId = asset.id;
+      toast.success("파일을 올렸습니다. 이 큐에 연결됩니다.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "파일을 올리지 못했습니다");
+    } finally {
+      mediaUploading = false;
+    }
+  }
+
+  // 타임라인 대본 레인에서 블록을 끌어 놓았을 때 — 시작/길이(ms)를 저장한다.
+  async function studioMoveBlock(blockId: string, startMs: number | null, durationMs: number | null) {
+    try {
+      await apiRequest(`/productions/${pid}/blocks/${blockId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ startMs, durationMs })
+      });
+      await load();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "블록 배치를 저장하지 못했습니다");
     }
   }
 
@@ -204,6 +342,7 @@
     formNote = "";
     formCharacterId = "";
     formDurationSec = "";
+    formAssetId = "";
     cueOpen = true;
   }
 
@@ -226,6 +365,7 @@
     formNote = cue.note ?? "";
     formCharacterId = cue.character?.id ?? "";
     formDurationSec = cue.durationSec ? String(cue.durationSec) : "";
+    formAssetId = cue.asset?.id ?? "";
     cueOpen = true;
   }
 
@@ -242,7 +382,8 @@
         note: formNote.trim() || undefined,
         sceneId: formSceneId || null,
         characterId: isActorTrack && formCharacterId ? formCharacterId : null,
-        durationSec: Number.isFinite(parsedDuration) && parsedDuration > 0 ? Math.min(3600, parsedDuration) : null
+        durationSec: Number.isFinite(parsedDuration) && parsedDuration > 0 ? Math.min(3600, parsedDuration) : null,
+        assetId: formAssetId || null
       };
       if (editingCue) {
         await apiRequest(`/productions/${pid}/cue-sheet/cues/${editingCue.id}`, {
@@ -671,6 +812,27 @@
           <Settings2Icon />
           트랙
         </Button>
+        <label
+          class="border-input hover:bg-accent inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border px-3 text-sm font-medium transition-colors {backgroundUploading
+            ? 'pointer-events-none opacity-50'
+            : ''}"
+          title="공연 뒷배경으로 재생할 영상을 올립니다 (mp4·webm·mov, 최대 500MB)"
+        >
+          <MonitorIcon class="size-4" />
+          {backgroundUploading ? "업로드 중…" : board?.production.backgroundAsset ? "배경 영상 교체" : "배경 영상"}
+          <input
+            type="file"
+            accept="video/mp4,video/webm,video/quicktime"
+            class="hidden"
+            onchange={onPickBackground}
+            disabled={backgroundUploading}
+          />
+        </label>
+        {#if board?.production.backgroundAsset}
+          <Button variant="ghost" size="sm" class="h-8" onclick={clearBackground} disabled={backgroundUploading}>
+            해제
+          </Button>
+        {/if}
       {/if}
       {#if canEditSomething && (board?.tracks.length ?? 0) > 0}
         <Button size="sm" class="h-8" onclick={() => openCreateCue()}>
@@ -749,11 +911,14 @@
         tracks={board.tracks}
         cues={board.cues}
         editableTrackIds={board.viewer.editableTrackIds}
+        background={backgroundVideo}
+        canEditScript={canManage}
         onEditCue={onStudioEdit}
         onAddCue={canEditSomething ? (trackId, sceneId) => openCreateCue(trackId, sceneId ?? "") : undefined}
         onDeleteCue={canEditSomething ? studioDeleteCue : undefined}
         onResizeCue={canEditSomething ? studioResizeCue : undefined}
         onReorderCue={canEditSomething ? studioReorderCue : undefined}
+        onMoveBlock={canManage ? studioMoveBlock : undefined}
         onOpenScript={openScriptScene}
       />
     </div>
@@ -980,6 +1145,50 @@
             </button>
           {/if}
         </div>
+      </div>
+      <div class="grid gap-2">
+        <Label>
+          미디어 첨부 <span class="text-muted-foreground font-normal">(영상·음원 파일 — 영상/음악 트랙 큐에 연결)</span>
+        </Label>
+        <div class="flex items-center gap-2">
+          <Select.Root type="single" bind:value={formAssetId}>
+            <Select.Trigger class="w-full">
+              {formAssetId
+                ? (() => {
+                    const found = mediaAssets.find((asset) => asset.id === formAssetId);
+                    return found ? `${found.kind === "VIDEO" ? "🎬" : "🎵"} ${mediaName(found)}` : "첨부 파일";
+                  })()
+                : "첨부 없음"}
+            </Select.Trigger>
+            <Select.Content>
+              <Select.Item value="" label="첨부 없음" />
+              {#each mediaAssets as asset (asset.id)}
+                <Select.Item
+                  value={asset.id}
+                  label={`${asset.kind === "VIDEO" ? "🎬" : "🎵"} ${mediaName(asset)}`}
+                />
+              {/each}
+            </Select.Content>
+          </Select.Root>
+          <label
+            class="border-input hover:bg-accent inline-flex h-9 shrink-0 cursor-pointer items-center rounded-md border px-3 text-xs font-medium whitespace-nowrap transition-colors {mediaUploading
+              ? 'pointer-events-none opacity-50'
+              : ''}"
+            title="영상(mp4·webm·mov) 또는 음원(mp3·wav·m4a·aac)을 올립니다"
+          >
+            {mediaUploading ? "업로드 중…" : "파일 올리기"}
+            <input
+              type="file"
+              accept="video/mp4,video/webm,video/quicktime,audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/aac,audio/x-m4a"
+              class="hidden"
+              onchange={onPickCueMedia}
+              disabled={mediaUploading}
+            />
+          </label>
+        </div>
+        {#if mediaAssets.length === 0}
+          <p class="text-muted-foreground text-xs">아직 올라온 영상·음원이 없어요. 파일 올리기로 추가하면 여기서 고를 수 있어요.</p>
+        {/if}
       </div>
       <div class="grid gap-2">
         <Label for="note">메모</Label>

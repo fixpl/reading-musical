@@ -122,6 +122,7 @@ enum AssetKind {
   AUDIO
   IMAGE
   DOCUMENT
+  VIDEO
   @@map("asset_kind")
 }
 
@@ -303,6 +304,9 @@ model Production {
   currentPhase Phase @default(PLANNING) @map("current_phase")
   visibility Visibility @default(DRAFT)
   archived Boolean @default(false)
+  // 공연 뒷배경 영상 — 큐시트 타임라인 재생 시 기준 시계가 되는 영상 파일.
+  backgroundAssetId String? @map("background_asset_id")
+  backgroundAsset Asset? @relation("ProductionBackground", fields: [backgroundAssetId], references: [id])
   // 소프트 삭제: 실제 데이터는 지우지 않고 이 필드로 "삭제됨(휴지통)"을 표시한다. 목록·접근에서 제외, 복구 가능.
   deletedAt DateTime? @map("deleted_at")
   positionRequirements PositionRequirement[]
@@ -494,6 +498,9 @@ model SceneBlock {
   character Role? @relation(fields: [characterId], references: [id])
   text String @db.Text
   cueLabel String? @map("cue_label")
+  // 타임라인 배치(밀리초) — 배경 영상 기준으로 이 블록이 언제부터 얼마나 보이는지. null이면 자동 흐름 배치.
+  startMs Int? @map("start_ms")
+  durationMs Int? @map("duration_ms")
   annotations Annotation[]
   musicCues MusicCue[]
   createdAt DateTime @default(now()) @map("created_at")
@@ -946,6 +953,8 @@ model Asset {
   checksum String?
   musicTracks MusicTrack[]
   scriptImports ScriptImport[]
+  trackCues TrackCue[]
+  backgroundForProductions Production[] @relation("ProductionBackground")
   createdAt DateTime @default(now()) @map("created_at")
   @@index([productionId])
   @@index([ownerId])
@@ -1107,6 +1116,9 @@ model TrackCue {
   character Role? @relation(fields: [characterId], references: [id])
   // 예상 소요 초 — QLab처럼 큐마다 duration을 두어 타임라인을 실제 시간에 가깝게 한다
   durationSec Int? @map("duration_sec")
+  // 첨부 미디어(영상·음원) — 영상/음악 트랙 큐가 실제 파일을 가리킨다.
+  assetId String? @map("asset_id")
+  asset Asset? @relation(fields: [assetId], references: [id])
   // 소프트 삭제(휴지통) — 큐 삭제·큐시트 초기화 시 실데이터는 남기고 감춘다. 복구 가능.
   deletedAt DateTime? @map("deleted_at")
   order Int @default(0)

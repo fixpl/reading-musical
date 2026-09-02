@@ -121,6 +121,47 @@ const ASSET_POLICIES: Record<AssetPurpose, AssetPolicy> = {
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ["docx"]
     },
     storagePrefix: "checklist"
+  },
+  [AssetPurpose.BACKGROUND_VIDEO]: {
+    kind: AssetKind.VIDEO,
+    maxBytes: 500 * 1024 * 1024,
+    allowedMimeTypes: ["video/mp4", "video/webm", "video/quicktime"],
+    allowedExtensionsByMime: {
+      "video/mp4": ["mp4", "m4v"],
+      "video/webm": ["webm"],
+      "video/quicktime": ["mov"]
+    },
+    storagePrefix: "background"
+  },
+  [AssetPurpose.CUE_MEDIA]: {
+    // 영상·음악 트랙 큐에 붙는 파일 — mime으로 VIDEO/AUDIO를 가린다(resolveAssetKind).
+    kind: AssetKind.VIDEO,
+    maxBytes: 500 * 1024 * 1024,
+    allowedMimeTypes: [
+      "video/mp4",
+      "video/webm",
+      "video/quicktime",
+      "audio/mpeg",
+      "audio/mp3",
+      "audio/wav",
+      "audio/x-wav",
+      "audio/mp4",
+      "audio/aac",
+      "audio/x-m4a"
+    ],
+    allowedExtensionsByMime: {
+      "video/mp4": ["mp4", "m4v"],
+      "video/webm": ["webm"],
+      "video/quicktime": ["mov"],
+      "audio/mpeg": ["mp3"],
+      "audio/mp3": ["mp3"],
+      "audio/wav": ["wav"],
+      "audio/x-wav": ["wav"],
+      "audio/mp4": ["m4a", "mp4"],
+      "audio/aac": ["aac"],
+      "audio/x-m4a": ["m4a"]
+    },
+    storagePrefix: "cue-media"
   }
 };
 
@@ -180,6 +221,16 @@ export class AssetsService {
         allowedExtensions: this.formatAllowedExtensions(policy)
       }
     };
+  }
+
+  /** 공연의 미디어(영상·음원) 파일 목록 — 큐시트 미디어 라이브러리·큐 첨부 선택용. */
+  async listProductionMedia(productionId: string, user: RequestUser) {
+    await this.assertMembership(productionId, user, VIEW_ROLES);
+    return this.prisma.asset.findMany({
+      where: { productionId, kind: { in: [AssetKind.AUDIO, AssetKind.VIDEO] } },
+      orderBy: { createdAt: "desc" },
+      select: { id: true, kind: true, mime: true, sizeBytes: true, storageKey: true, createdAt: true }
+    });
   }
 
   async getSignedUrl(assetId: string, user: RequestUser) {
@@ -267,6 +318,8 @@ export class AssetsService {
     if (purpose === AssetPurpose.STAGE_EXPORT) return STAGE_EDIT_ROLES;
     if (purpose === AssetPurpose.RUN_SHEET_EXPORT) return VIEW_ROLES;
     if (purpose === AssetPurpose.CHECKLIST_EVIDENCE) return CHECKLIST_EVIDENCE_ROLES;
+    if (purpose === AssetPurpose.BACKGROUND_VIDEO) return STAGE_EDIT_ROLES;
+    if (purpose === AssetPurpose.CUE_MEDIA) return STAGE_EDIT_ROLES;
     return VIEW_ROLES;
   }
 
@@ -276,6 +329,9 @@ export class AssetsService {
     }
     if (purpose === AssetPurpose.CHECKLIST_EVIDENCE && mimeType.startsWith("image/")) {
       return AssetKind.IMAGE;
+    }
+    if (purpose === AssetPurpose.CUE_MEDIA) {
+      return mimeType.startsWith("audio/") ? AssetKind.AUDIO : AssetKind.VIDEO;
     }
     return policy.kind;
   }

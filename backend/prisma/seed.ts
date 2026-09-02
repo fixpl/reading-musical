@@ -201,6 +201,8 @@ async function seedProductionDemoData(input: { productionId: string; adminId: st
 
   const { scenes } = await ensureScriptFixtures(input.productionId, actorMembership.id);
   await ensureCueTrackFixtures(input.productionId, actorMembership.id, staffMembership.id);
+  await ensureTrackCueFixtures(input.productionId, input.adminId, scenes);
+  await ensureBlockTimingFixtures(scenes);
   const musicCue = await ensureMusicFixtures(input.productionId, input.adminId, scenes[0]?.id ?? null);
   await ensureStageFixtures(input.productionId, scenes[0]?.id ?? null);
   await ensureScheduleFixtures({
@@ -325,6 +327,82 @@ async function ensureCueTrackFixtures(productionId: string, actorMembershipId: s
       create: { productionId, name: "효과음", order: 2, ownerMembershipId: staffMembershipId }
     })
   ]);
+}
+
+// 샘플 트랙 큐 — 첫 화면이 빈 상태로 뜨지 않도록 배우·효과음 트랙에 기본 큐를 넣는다.
+async function ensureTrackCueFixtures(productionId: string, authorId: string, scenes: { id: string; order: number }[]) {
+  const sceneOne = scenes[0];
+  const sceneTwo = scenes[1];
+  const actorTrack = await prisma.cueTrack.findFirst({ where: { productionId, name: "배우" } });
+  const sfxTrack = await prisma.cueTrack.findFirst({ where: { productionId, name: "효과음" } });
+  const role = await prisma.role.findFirst({ where: { productionId, name: "민준" } });
+
+  if (actorTrack && sceneOne && (await prisma.trackCue.count({ where: { trackId: actorTrack.id, deletedAt: null } })) === 0) {
+    await prisma.trackCue.createMany({
+      data: [
+        {
+          productionId,
+          trackId: actorTrack.id,
+          sceneId: sceneOne.id,
+          cueNumber: "배01",
+          trigger: "해설 시작 신호",
+          content: "민준 테이블 중앙 의자에 착석",
+          characterId: role?.id ?? null,
+          durationSec: 30,
+          order: 0,
+          authorId
+        },
+        {
+          productionId,
+          trackId: actorTrack.id,
+          sceneId: sceneTwo?.id ?? sceneOne.id,
+          cueNumber: "배02",
+          trigger: "M02 가사 시작",
+          content: "민준 일어서서 정면 보고 노래",
+          characterId: role?.id ?? null,
+          durationSec: 60,
+          order: 1,
+          authorId
+        }
+      ]
+    });
+  }
+  if (sfxTrack && sceneOne && (await prisma.trackCue.count({ where: { trackId: sfxTrack.id, deletedAt: null } })) === 0) {
+    await prisma.trackCue.createMany({
+      data: [
+        {
+          productionId,
+          trackId: sfxTrack.id,
+          sceneId: sceneOne.id,
+          cueNumber: "효01",
+          trigger: "1장 시작과 함께",
+          content: "잔잔한 카페 ambient 사운드 재생",
+          durationSec: 45,
+          order: 0,
+          authorId
+        }
+      ]
+    });
+  }
+}
+
+// 대본 블록 타임라인 기본 배치 — 시간 미지정 블록에 순서대로 시작/길이를 채운다.
+async function ensureBlockTimingFixtures(scenes: { id: string; order: number }[]) {
+  let cursorMs = 0;
+  for (const scene of scenes) {
+    const blocks = await prisma.sceneBlock.findMany({
+      where: { sceneId: scene.id },
+      orderBy: { order: "asc" },
+      select: { id: true, type: true, startMs: true, durationMs: true }
+    });
+    for (const block of blocks) {
+      const durationMs = block.durationMs ?? (block.type === "LYRIC" ? 15000 : block.type === "DIALOGUE" ? 12000 : 8000);
+      if (block.startMs == null) {
+        await prisma.sceneBlock.update({ where: { id: block.id }, data: { startMs: cursorMs, durationMs } });
+      }
+      cursorMs = Math.max(cursorMs, (block.startMs ?? cursorMs) + durationMs);
+    }
+  }
 }
 
 async function ensureMusicFixtures(productionId: string, ownerId: string, sceneId: string | null) {

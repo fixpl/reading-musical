@@ -2,6 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Injectable,
 import { ConfigService } from "@nestjs/config";
 import {
   AnchorStatus,
+  AssetKind,
   ChecklistStatus,
   Phase,
   PlatformRole,
@@ -28,6 +29,7 @@ import {
   PutStaffAssignmentsDto,
   ReplacePositionRequirementsDto,
   SearchProductionQueryDto,
+  SetBackgroundVideoDto,
   UpdateMemberDto,
   UpdatePositionRequirementDto,
   UpdateProductionDto
@@ -499,6 +501,29 @@ export class ProductionsService {
       },
       checks
     };
+  }
+
+  /** 공연 뒷배경 영상 지정/해제 — 타임라인 재생의 기준 시계가 되는 영상. */
+  async setBackgroundVideo(productionId: string, dto: SetBackgroundVideoDto, user: RequestUser) {
+    await this.getProductionAccess(productionId, user);
+    if (dto.assetId) {
+      const asset = await this.prisma.asset.findFirst({
+        where: { id: dto.assetId, productionId, kind: AssetKind.VIDEO },
+        select: { id: true }
+      });
+      if (!asset) {
+        throw new NotFoundException("이 공연의 영상 파일을 찾을 수 없어요");
+      }
+    }
+    return this.prisma.production.update({
+      where: { id: productionId },
+      data: { backgroundAssetId: dto.assetId ?? null },
+      select: {
+        id: true,
+        backgroundAssetId: true,
+        backgroundAsset: { select: { id: true, kind: true, mime: true, sizeBytes: true, storageKey: true } }
+      }
+    });
   }
 
   async update(productionId: string, dto: UpdateProductionDto, user: RequestUser) {

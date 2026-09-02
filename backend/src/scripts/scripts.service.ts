@@ -323,7 +323,9 @@ export class ScriptsService {
         type: dto.type,
         text: dto.text?.trim(),
         characterId: dto.characterId === undefined ? undefined : dto.characterId || null,
-        cueLabel: dto.cueLabel === undefined ? undefined : dto.cueLabel?.trim() || null
+        cueLabel: dto.cueLabel === undefined ? undefined : dto.cueLabel?.trim() || null,
+        startMs: dto.startMs === undefined ? undefined : dto.startMs,
+        durationMs: dto.durationMs === undefined ? undefined : dto.durationMs
       }
     });
   }

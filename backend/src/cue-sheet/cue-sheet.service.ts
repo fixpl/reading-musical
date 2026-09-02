@@ -34,6 +34,7 @@ const CUE_INCLUDE = {
     }
   },
   character: { select: { id: true, name: true } },
+  asset: { select: { id: true, kind: true, mime: true, storageKey: true } },
   author: { select: { id: true, name: true } }
 } satisfies Prisma.TrackCueInclude;
 
@@ -45,7 +46,13 @@ export class CueSheetService {
     const [production, tracks, cues, scenes, editableTrackIds] = await Promise.all([
       this.prisma.production.findUnique({
         where: { id: productionId },
-        select: { id: true, title: true, currentPhase: true }
+        select: {
+          id: true,
+          title: true,
+          currentPhase: true,
+          backgroundAssetId: true,
+          backgroundAsset: { select: { id: true, kind: true, mime: true, sizeBytes: true, storageKey: true } }
+        }
       }),
       this.prisma.cueTrack.findMany({
         where: { productionId },
@@ -79,6 +86,8 @@ export class CueSheetService {
               type: true,
               text: true,
               order: true,
+              startMs: true,
+              durationMs: true,
               character: { select: { id: true, name: true } }
             }
           }
@@ -167,6 +176,7 @@ export class CueSheetService {
     await this.assertCanEditTrack(productionId, track.id, user);
     await this.assertScene(productionId, dto.sceneId);
     await this.assertCharacter(productionId, dto.characterId);
+    await this.assertMediaAsset(productionId, dto.assetId);
 
     const [order, count] = await Promise.all([
       this.nextCueOrder(trackId),
@@ -185,6 +195,7 @@ export class CueSheetService {
         note: dto.note?.trim() || null,
         characterId: dto.characterId ?? null,
         durationSec: dto.durationSec ?? null,
+        assetId: dto.assetId ?? null,
         order,
         authorId: user.id
       },
@@ -201,6 +212,9 @@ export class CueSheetService {
     if (dto.characterId !== undefined) {
       await this.assertCharacter(productionId, dto.characterId);
     }
+    if (dto.assetId !== undefined) {
+      await this.assertMediaAsset(productionId, dto.assetId);
+    }
 
     return this.prisma.trackCue.update({
       where: { id: cue.id },
@@ -211,7 +225,8 @@ export class CueSheetService {
         note: dto.note === undefined ? undefined : dto.note?.trim() || null,
         sceneId: dto.sceneId === undefined ? undefined : dto.sceneId,
         characterId: dto.characterId === undefined ? undefined : dto.characterId,
-        durationSec: dto.durationSec === undefined ? undefined : dto.durationSec
+        durationSec: dto.durationSec === undefined ? undefined : dto.durationSec,
+        assetId: dto.assetId === undefined ? undefined : dto.assetId
       },
       include: CUE_INCLUDE
     });
@@ -492,6 +507,18 @@ export class CueSheetService {
     const role = await this.prisma.role.findFirst({ where: { id: characterId, productionId }, select: { id: true } });
     if (!role) {
       throw new NotFoundException("이 공연의 배역(인물)을 찾을 수 없습니다");
+    }
+  }
+
+  /** 큐에 붙이는 미디어는 같은 공연의 영상·음원 파일이어야 한다. */
+  private async assertMediaAsset(productionId: string, assetId: string | null | undefined) {
+    if (!assetId) return;
+    const asset = await this.prisma.asset.findFirst({
+      where: { id: assetId, productionId, kind: { in: ["AUDIO", "VIDEO"] } },
+      select: { id: true }
+    });
+    if (!asset) {
+      throw new NotFoundException("이 공연의 영상·음원 파일을 찾을 수 없습니다");
     }
   }
 

@@ -10,7 +10,7 @@
   import { Label } from "$lib/components/ui/label";
   import { Skeleton } from "$lib/components/ui/skeleton";
   import { Textarea } from "$lib/components/ui/textarea";
-  import { apiRequest } from "$lib/api/client";
+  import { apiRequest, uploadSignedObject } from "$lib/api/client";
   import PlusIcon from "@lucide/svelte/icons/plus";
   import SparklesIcon from "@lucide/svelte/icons/sparkles";
   import Trash2Icon from "@lucide/svelte/icons/trash-2";
@@ -146,6 +146,138 @@
       toast.error(error instanceof Error ? error.message : "대본을 만들지 못했습니다");
     } finally {
       saving = false;
+    }
+  }
+
+  // 파일/붙여넣기 불러오기 — 바로 반영하지 않고 검수 draft를 거친다.
+  type ImportPreview = {
+    importId: string;
+    status: string;
+    detectedActs: number;
+    detectedScenes: number;
+    blocks: Array<{
+      tempId: string;
+      type: Block["type"];
+      speakerName?: string;
+      text: string;
+      actTitle?: string;
+      sceneTitle?: string;
+    }>;
+    warnings: Array<{ code: string; message: string }>;
+  };
+  type ReviewedImportBlock = {
+    tempId: string;
+    type: Block["type"];
+    speakerName: string;
+    text: string;
+    actTitle: string;
+    sceneTitle: string;
+  };
+  let importOpen = $state(false);
+  let importText = $state("");
+  let importBusy = $state(false);
+  let importPreview = $state<ImportPreview | null>(null);
+  let reviewedBlocks = $state<ReviewedImportBlock[]>([]);
+
+  function openImport() {
+    importText = "";
+    importPreview = null;
+    reviewedBlocks = [];
+    importOpen = true;
+  }
+
+  function setImportPreview(preview: ImportPreview) {
+    importPreview = preview;
+    reviewedBlocks = preview.blocks.map((block) => ({
+      tempId: block.tempId,
+      type: block.type,
+      speakerName: block.speakerName ?? "",
+      text: block.text,
+      actTitle: block.actTitle ?? "가져온 대본",
+      sceneTitle: block.sceneTitle ?? "검수 반영"
+    }));
+  }
+
+  async function createImportFromPaste() {
+    if (!script || importText.trim().length < 2) return;
+    importBusy = true;
+    try {
+      const preview = await apiRequest<ImportPreview>(`/productions/${pid}/scripts/${script.id}/imports`, {
+        method: "POST",
+        body: JSON.stringify({ rawText: importText, sourceType: "PASTE", parseMode: "BLOCK_DRAFT" })
+      });
+      setImportPreview(preview);
+      toast.success("검수할 초안을 만들었습니다. 확인 후 반영해 주세요.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "불러오지 못했습니다");
+    } finally {
+      importBusy = false;
+    }
+  }
+
+  async function onImportFile(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file || !script) return;
+    importBusy = true;
+    try {
+      const created = await apiRequest<{ asset: { id: string }; upload: { url: string; method?: string } }>("/assets", {
+        method: "POST",
+        body: JSON.stringify({
+          purpose: "SCRIPT_IMPORT",
+          productionId: pid,
+          fileName: file.name,
+          mimeType: file.type || "text/plain",
+          size: file.size
+        })
+      });
+      await uploadSignedObject(created.upload, file, file.type || "text/plain");
+      const preview = await apiRequest<ImportPreview>(`/productions/${pid}/scripts/${script.id}/imports`, {
+        method: "POST",
+        body: JSON.stringify({ assetId: created.asset.id, parseMode: "BLOCK_DRAFT" })
+      });
+      setImportPreview(preview);
+      toast.success("파일에서 검수할 초안을 만들었습니다. 확인 후 반영해 주세요.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "파일을 읽지 못했습니다");
+    } finally {
+      importBusy = false;
+    }
+  }
+
+  async function applyImport() {
+    if (!script || !importPreview) return;
+    const blocks = reviewedBlocks
+      .map((block) => ({
+        tempId: block.tempId,
+        type: block.type,
+        speakerName: block.speakerName.trim() || undefined,
+        text: block.text.trim(),
+        actTitle: block.actTitle.trim() || undefined,
+        sceneTitle: block.sceneTitle.trim() || undefined
+      }))
+      .filter((block) => block.text.length > 0);
+    if (blocks.length === 0) {
+      toast.error("반영할 블록이 없습니다");
+      return;
+    }
+    importBusy = true;
+    try {
+      await apiRequest(`/productions/${pid}/scripts/${script.id}/imports/${importPreview.importId}/apply`, {
+        method: "POST",
+        body: JSON.stringify({ mode: "APPEND", reviewedBlocks: blocks, createVersion: true, versionName: "import 반영본" })
+      });
+      toast.success(`가져온 대본 ${blocks.length}블록을 반영했습니다`);
+      importOpen = false;
+      importPreview = null;
+      reviewedBlocks = [];
+      importText = "";
+      await load(true);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "반영하지 못했습니다");
+    } finally {
+      importBusy = false;
     }
   }
 
@@ -342,6 +474,11 @@
         <SparklesIcon />
         AI 초안
       </Button>
+      {#if script}
+        <Button variant="outline" size="sm" class="h-8" onclick={openImport} disabled={saving}>
+          불러오기
+        </Button>
+      {/if}
       <Button variant="outline" size="sm" class="h-8" onclick={createScript} disabled={saving}>
         <PlusIcon />
         새 대본
@@ -616,5 +753,102 @@
       <Button type="button" variant="ghost" onclick={() => (showDelete = false)} disabled={deleting}>취소</Button>
       <Button type="button" variant="destructive" onclick={confirmDeleteScript} disabled={deleting}>삭제</Button>
     </Dialog.Footer>
+  </Dialog.Content>
+</Dialog.Root>
+
+<!-- 대본 불러오기 (파일/붙여넣기 → 검수 → 반영) -->
+<Dialog.Root bind:open={importOpen}>
+  <Dialog.Content class="max-h-[85dvh] overflow-y-auto sm:max-w-2xl">
+    <Dialog.Header>
+      <Dialog.Title>대본 불러오기</Dialog.Title>
+      <Dialog.Description>
+        {importPreview
+          ? "가져온 내용을 검수하고 현재 대본 뒤에 이어 붙입니다. 반영 전 현재 대본은 버전으로 백업됩니다."
+          : "txt·docx·pdf 파일을 올리거나, 대본 텍스트를 붙여넣으세요. 바로 반영하지 않고 검수 단계를 거칩니다."}
+      </Dialog.Description>
+    </Dialog.Header>
+
+    {#if !importPreview}
+      <div class="grid gap-4">
+        <div class="grid gap-2">
+          <div class="flex items-center justify-between">
+            <Label for="importText">대본 내용 붙여넣기</Label>
+            <label class="text-primary cursor-pointer text-xs font-medium hover:underline {importBusy ? 'pointer-events-none opacity-50' : ''}">
+              {importBusy ? "읽는 중..." : "파일 선택 (txt·docx·pdf)"}
+              <input
+                type="file"
+                accept=".txt,.pdf,.docx,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                class="hidden"
+                disabled={importBusy}
+                onchange={onImportFile}
+              />
+            </label>
+          </div>
+          <Textarea
+            id="importText"
+            bind:value={importText}
+            class="h-56 resize-none overflow-y-auto font-mono text-xs leading-relaxed"
+            placeholder={"예시)\n1막\n1장. 만남\n지문: 묵직한 정적.\n민준: 오랜만이야."}
+          />
+        </div>
+        <Dialog.Footer class="gap-2">
+          <Button type="button" variant="ghost" onclick={() => (importOpen = false)} disabled={importBusy}>취소</Button>
+          <Button type="button" onclick={createImportFromPaste} disabled={importBusy || importText.trim().length < 2}>
+            {importBusy ? "만드는 중..." : "검수 초안 만들기"}
+          </Button>
+        </Dialog.Footer>
+      </div>
+    {:else}
+      <div class="grid gap-3">
+        <div class="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+          <span>막 {importPreview.detectedActs} · 장 {importPreview.detectedScenes} · 블록 {reviewedBlocks.length}</span>
+          {#each importPreview.warnings as warning (warning.code)}
+            <span class="text-amber-600">{warning.message}</span>
+          {/each}
+        </div>
+        <div class="grid max-h-[46dvh] gap-1.5 overflow-y-auto pe-1">
+          {#each reviewedBlocks as block, index (block.tempId)}
+            <div class="border-border/60 grid grid-cols-[88px_minmax(0,1fr)] items-start gap-2 rounded-lg border p-2">
+              <Select.Root
+                type="single"
+                value={block.type}
+                onValueChange={(value) =>
+                  (reviewedBlocks = reviewedBlocks.map((item, i) =>
+                    i === index ? { ...item, type: value as ReviewedImportBlock["type"] } : item
+                  ))}
+              >
+                <Select.Trigger class="h-8 w-full text-xs">{typeLabel(block.type)}</Select.Trigger>
+                <Select.Content>
+                  {#each BLOCK_TYPES as item (item.value)}
+                    <Select.Item value={item.value} label={item.label} />
+                  {/each}
+                </Select.Content>
+              </Select.Root>
+              <div class="grid gap-1">
+                <Textarea
+                  value={block.text}
+                  rows={2}
+                  class="text-xs"
+                  oninput={(event) =>
+                    (reviewedBlocks = reviewedBlocks.map((item, i) =>
+                      i === index ? { ...item, text: (event.currentTarget as HTMLTextAreaElement).value } : item
+                    ))}
+                />
+                <div class="text-muted-foreground flex flex-wrap gap-x-2 text-[11px]">
+                  {#if block.speakerName}<span>화자 · {block.speakerName}</span>{/if}
+                  <span>{block.actTitle} · {block.sceneTitle}</span>
+                </div>
+              </div>
+            </div>
+          {/each}
+        </div>
+        <Dialog.Footer class="gap-2">
+          <Button type="button" variant="ghost" onclick={() => (importPreview = null)} disabled={importBusy}>다시 불러오기</Button>
+          <Button type="button" onclick={applyImport} disabled={importBusy || reviewedBlocks.length === 0}>
+            {importBusy ? "반영 중..." : `대본에 반영 (${reviewedBlocks.length})`}
+          </Button>
+        </Dialog.Footer>
+      </div>
+    {/if}
   </Dialog.Content>
 </Dialog.Root>

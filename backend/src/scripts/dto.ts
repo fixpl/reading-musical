@@ -105,6 +105,18 @@ export class UpdateBlockDto {
   @IsOptional()
   @IsString()
   cueLabel?: string | null;
+
+  @ApiPropertyOptional({ description: "타임라인 시작 위치(ms) — null이면 자동 흐름 배치" })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  startMs?: number | null;
+
+  @ApiPropertyOptional({ description: "타임라인 표시 길이(ms) — null이면 자동" })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  durationMs?: number | null;
 }
 
 export class ReorderBlocksDto {
