@@ -67,9 +67,15 @@
   let loading = $state(true);
   let responding = $state(false);
 
+  let loadRevision = 0;
   async function loadPage() {
+    const revision = ++loadRevision;
+    const productionId = pid;
+    loading = true;
+    production = null; detail = null; events = []; posts = []; people = []; nextEvent = null; myAttendanceStatus = null;
     try {
       const [me, found] = await Promise.all([fetchCurrentUser(), getMyProduction(pid)]);
+      if (revision !== loadRevision || productionId !== pid) return;
       production = found;
 
       const [detailResult, schedule, board, peopleResult] = await Promise.allSettled([
@@ -78,6 +84,7 @@
         apiRequest<{ items: Post[] }>(`/productions/${pid}/board`),
         apiRequest<{ people: Person[] }>(`/productions/${pid}/people`)
       ]);
+      if (revision !== loadRevision || productionId !== pid) return;
       if (detailResult.status === "fulfilled") detail = detailResult.value;
       if (board.status === "fulfilled") posts = board.value.items.slice(0, 4);
       if (peopleResult.status === "fulfilled") people = peopleResult.value.people;
@@ -93,9 +100,9 @@
         }
       }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "공연 정보를 불러오지 못했습니다");
+      if (revision === loadRevision && productionId === pid) toast.error(error instanceof Error ? error.message : "공연 정보를 불러오지 못했습니다");
     } finally {
-      loading = false;
+      if (revision === loadRevision && productionId === pid) loading = false;
     }
   }
 
@@ -222,6 +229,12 @@
       {/if}
     </div>
 
+    <nav aria-label="공연 빠른 작업" class="my-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
+      <Button href={`/app/p/${pid}/live`} class="min-h-12">개인 연습 시작</Button>
+      <Button href={`/app/p/${pid}/script`} variant="outline" class="min-h-12">대본 확인</Button>
+      <Button href={`/app/p/${pid}/schedule`} variant="outline" class="min-h-12">공유 일정</Button>
+      <Button href={`/app/p/${pid}/cuesheet`} variant="outline" class="min-h-12">큐시트 · 제작</Button>
+    </nav>
     <div class="mt-2 grid gap-4 lg:grid-cols-[minmax(0,1fr)_340px]">
       <!-- 왼쪽: 다음 일정 + 공지·소통 -->
       <div class="grid content-start gap-4">

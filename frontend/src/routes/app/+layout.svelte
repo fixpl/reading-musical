@@ -49,6 +49,7 @@
     pid
       ? [
           { title: "대시보드", url: `/app/p/${pid}`, icon: ClipboardListIcon, exact: true },
+          { title: "연습 · 시간표", url: `/app/p/${pid}/live`, icon: MicVocalIcon, exact: false },
           { title: "큐시트", url: `/app/p/${pid}/cuesheet`, icon: MusicIcon, exact: false },
           { title: "대본", url: `/app/p/${pid}/script`, icon: BookOpenIcon, exact: false },
           { title: "일정", url: `/app/p/${pid}/schedule`, icon: CalendarDaysIcon, exact: false },
@@ -73,32 +74,22 @@
   );
 
   $effect(() => {
-    if (!pid) {
-      productionTitle = null;
-      canManageProduction = false;
-      return;
-    }
-    const cached = myProductions.find((item) => item.id === pid);
-    if (cached) {
-      productionTitle = cached.title;
-    } else {
-      apiRequest<{ id: string; title: string }>(`/productions/${pid}`)
-        .then((production) => (productionTitle = production.title))
-        .catch(() => (productionTitle = null));
-    }
-    if (isAdminRole(user?.platformRole)) {
-      canManageProduction = true;
-    } else {
-      apiRequest<{ myRoles: string[] }>(`/productions/${pid}/dashboard`)
-        .then((dashboard) => (canManageProduction = dashboard.myRoles.some((role) => STAFF_ROLES.includes(role))))
-        .catch(() => (canManageProduction = false));
-    }
+    const id = pid;
+    productionTitle = null;
+    canManageProduction = false;
+    if (!id || !user) return;
+    let active = true;
+    // Use server-scoped permissions, not a global ORG_ADMIN label.
+    void apiRequest<{ production: { title: string }; viewer: { canManageTracks: boolean } }>(`/productions/${id}/cue-sheet`)
+      .then((result) => { if (active) { productionTitle = result.production.title; canManageProduction = result.viewer.canManageTracks; } })
+      .catch(() => { if (active) { productionTitle = null; canManageProduction = false; } });
+    return () => { active = false; };
   });
 
   const currentTitle = $derived.by(() => {
     if (pid) {
       return (
-        prodMenu.find((item) =>
+        [...prodMenu, ...manageMenu.map((item) => ({ ...item, exact: false }))].find((item) =>
           item.exact ? $page.url.pathname === item.url : $page.url.pathname.startsWith(item.url)
         )?.title ?? "공연"
       );
@@ -311,15 +302,21 @@
       </Sidebar.Footer>
     </Sidebar.Root>
 
-    <Sidebar.Inset>
-      <header class="flex h-14 shrink-0 items-center gap-2 px-4">
+    <Sidebar.Inset class="min-w-0">
+      <header class="bg-background/95 sticky top-0 z-20 flex h-14 shrink-0 items-center gap-2 border-b px-4 backdrop-blur">
         <Sidebar.Trigger class="-ms-1" />
         <Separator orientation="vertical" class="me-2 data-[orientation=vertical]:h-4" />
         <span class="text-sm font-medium">{currentTitle}</span>
       </header>
-      <div class="flex flex-1 flex-col gap-4 p-4 pt-0">
+      <div class="flex min-w-0 flex-1 flex-col gap-4 p-3 pt-4 pb-[calc(6rem+env(safe-area-inset-bottom))] sm:p-5 md:pb-5">
         {@render children()}
       </div>
+      <nav aria-label="모바일 빠른 메뉴" class="bg-background/95 fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t px-2 pb-[env(safe-area-inset-bottom)] backdrop-blur md:hidden">
+        {#each (pid ? [{ title: "공연 홈", url: `/app/p/${pid}`, icon: HouseIcon, exact: true }, { title: "일정", url: `/app/p/${pid}/schedule`, icon: CalendarDaysIcon, exact: false }, { title: "연습", url: `/app/p/${pid}/live`, icon: MicVocalIcon, exact: false }, { title: "소통", url: `/app/p/${pid}/board`, icon: MessageCircleIcon, exact: false }] : menu) as item (item.url)}
+          {@const active = item.exact ? $page.url.pathname === item.url : $page.url.pathname.startsWith(item.url)}
+          <a href={item.url} aria-current={active ? "page" : undefined} class="flex min-h-16 min-w-0 flex-col items-center justify-center gap-1 rounded-lg px-1 text-xs {active ? 'text-primary font-bold' : 'text-muted-foreground'}"><item.icon class="size-5" /><span>{item.title}{item.url === '/app/notifications' && unread > 0 ? ` (${unread > 99 ? '99+' : unread})` : ''}</span></a>
+        {/each}
+      </nav>
     </Sidebar.Inset>
   </Sidebar.Provider>
 {/if}

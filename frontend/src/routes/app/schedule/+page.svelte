@@ -11,6 +11,7 @@
   import { ApiError, apiRequest } from "$lib/api/client";
   import { listMyProductions, type MyProduction } from "$lib/api/productions";
   import { EVENT_TYPE_LABELS, formatDateTime } from "$lib/domain/labels";
+  import { groupCalendarDays } from "$lib/domain/schedule-calendar";
   import ChevronLeftIcon from "@lucide/svelte/icons/chevron-left";
   import ChevronRightIcon from "@lucide/svelte/icons/chevron-right";
   import PlusIcon from "@lucide/svelte/icons/plus";
@@ -44,7 +45,7 @@
   let responding = $state<string | null>(null);
 
   // 달력 ↔ 목록 보기 + 일정 클릭 시 상세
-  let view = $state<"calendar" | "list">("calendar");
+  let view = $state<"calendar" | "list">("list");
   let detailEvent = $state<MyAttendance | null>(null);
 
   // 스케줄 등록 — 나만 보는 개인 일정(기간 지원) 또는 공연과 공유되는 일정.
@@ -95,31 +96,13 @@
     }
   }
 
-  const eventsByDay = $derived.by(() => {
-    const map = new Map<string, MyAttendance[]>();
-    for (const attendance of attendances) {
-      const key = dayKey(new Date(attendance.event.startAt));
-      if (!map.has(key)) map.set(key, []);
-      map.get(key)!.push(attendance);
-    }
-    return map;
-  });
+  const eventsByDay = $derived(
+    groupCalendarDays(attendances, (attendance) => attendance.event, calYear, calMonth)
+  );
 
-  const blocksByDay = $derived.by(() => {
-    const map = new Map<string, Availability[]>();
-    for (const block of availabilities) {
-      const start = new Date(block.startAt);
-      const end = new Date(block.endAt);
-      const cursor = new Date(start.getFullYear(), start.getMonth(), start.getDate());
-      while (cursor.getTime() <= end.getTime()) {
-        const key = dayKey(cursor);
-        if (!map.has(key)) map.set(key, []);
-        map.get(key)!.push(block);
-        cursor.setDate(cursor.getDate() + 1);
-      }
-    }
-    return map;
-  });
+  const blocksByDay = $derived(
+    groupCalendarDays(availabilities, (block) => block, calYear, calMonth)
+  );
 
   const calendarCells = $derived.by(() => {
     const first = new Date(calYear, calMonth, 1);
@@ -152,10 +135,11 @@
   // 목록 보기 — 다가오는 일정을 날짜별로 묶는다(오늘 0시 이후).
   const listGroups = $derived.by(() => {
     const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
-    const upcoming = attendances.filter((a) => new Date(a.event.endAt).getTime() >= startOfToday);
+    const upcoming = attendances.filter((a) => new Date(a.event.endAt).getTime() > startOfToday);
     const groups: Array<{ key: string; date: Date; events: MyAttendance[] }> = [];
     for (const attendance of upcoming) {
-      const key = dayKey(new Date(attendance.event.startAt));
+      // An ongoing multi-day rehearsal belongs under today, not a past date.
+      const key = dayKey(new Date(Math.max(Date.parse(attendance.event.startAt), startOfToday)));
       let group = groups.find((g) => g.key === key);
       if (!group) {
         const [y, m, d] = key.split("-").map(Number);
@@ -181,6 +165,7 @@
     const next = new Date(calYear, calMonth + delta, 1);
     calYear = next.getFullYear();
     calMonth = next.getMonth();
+    selectedKey = dayKey(next);
   }
 
   function goToday() {
@@ -220,12 +205,12 @@
   let conflicts = $state<ConflictItem[] | null>(null);
   let overrideReason = $state("");
   // 강행(충돌 무시 배정)은 제작진·운영자만 — 서버가 409 payload에 canOverride로 알려준다.
-  let canOverride = $state(true);
+  let canOverride = $state(false);
 
   function clearConflicts() {
     conflicts = null;
     overrideReason = "";
-    canOverride = true;
+    canOverride = false;
   }
 
   function openAdd(dateKey?: string) {
@@ -273,8 +258,8 @@
         return;
       }
       const evStartAt = new Date(`${formStartDate}T${formStart}:00`);
-      const evEndAt = new Date(`${formStartDate}T${formEnd}:00`);
-      if (evEndAt.getTime() <= evStartAt.getTime()) {
+      const evEndAt = new Date(`${formEndDate || formStartDate}T${formEnd}:00`);
+      if (!Number.isFinite(evStartAt.getTime()) || !Number.isFinite(evEndAt.getTime()) || evEndAt.getTime() <= evStartAt.getTime()) {
         toast.error("종료가 시작보다 빨라요. 시간을 확인해 주세요.");
         return;
       }
@@ -301,7 +286,7 @@
           const details = error.details as { conflicts?: ConflictItem[]; canOverride?: boolean } | undefined;
           if (details?.conflicts?.length) {
             conflicts = details.conflicts;
-            canOverride = details.canOverride !== false;
+            canOverride = details.canOverride === true;
             formSaving = false;
             return;
           }
@@ -320,7 +305,7 @@
     const endDate = formEndDate || formStartDate;
     const startAt = new Date(`${formStartDate}T${formAllDay ? "00:00" : formStart}:00`);
     const endAt = new Date(`${endDate}T${formAllDay ? "23:59" : formEnd}:00`);
-    if (endAt.getTime() <= startAt.getTime()) {
+    if (!Number.isFinite(startAt.getTime()) || !Number.isFinite(endAt.getTime()) || endAt.getTime() <= startAt.getTime()) {
       toast.error("종료가 시작보다 빨라요. 날짜와 시간을 확인해 주세요.");
       return;
     }
@@ -396,11 +381,11 @@
       <h1 class="text-xl font-bold tracking-tight">내 일정</h1>
       <p class="text-muted-foreground text-sm">공연 일정과 개인 일정을 한곳에서 관리하고, 공연 배정 전 시간 충돌을 확인합니다.</p>
     </div>
-    <div class="ms-auto flex items-center gap-1.5">
+    <div class="flex w-full flex-wrap items-center gap-2 sm:ms-auto sm:w-auto">
       <div class="bg-muted flex rounded-lg p-0.5">
         <button
           type="button"
-          class="rounded-md px-2.5 py-1 text-xs font-medium transition-colors {view === 'calendar'
+          class="min-h-11 rounded-md px-3 py-2 text-sm font-medium transition-colors {view === 'calendar'
             ? 'bg-background shadow-sm'
             : 'text-muted-foreground hover:text-foreground'}"
           onclick={() => (view = "calendar")}
@@ -409,7 +394,7 @@
         </button>
         <button
           type="button"
-          class="rounded-md px-2.5 py-1 text-xs font-medium transition-colors {view === 'list'
+          class="min-h-11 rounded-md px-3 py-2 text-sm font-medium transition-colors {view === 'list'
             ? 'bg-background shadow-sm'
             : 'text-muted-foreground hover:text-foreground'}"
           onclick={() => (view = "list")}
@@ -417,7 +402,7 @@
           목록
         </button>
       </div>
-      <Button size="sm" class="h-8" onclick={() => openAdd()}>
+      <Button size="sm" class="min-h-11" onclick={() => openAdd()}>
         <PlusIcon />
         스케줄 등록
       </Button>
@@ -656,13 +641,20 @@
           {/each}
         {/if}
       </div>
+      <section class="bg-card mt-4 rounded-2xl border p-4 sm:p-5">
+        <h2 class="font-semibold">다가오는 개인 일정</h2>
+        <p class="text-muted-foreground mt-1 text-xs">상세 내용은 본인만 볼 수 있으며 공연 일정 배정 시 시간 충돌에 반영됩니다.</p>
+        {#each myBlocks.filter((block) => new Date(block.endAt).getTime() > Date.now()) as block (block.id)}
+          <div class="mt-3 flex flex-wrap items-center gap-2 border-t pt-3"><div class="min-w-0 flex-1"><p class="break-words text-sm font-medium">{blockTitle(block)}</p><p class="text-muted-foreground mt-1 text-xs">{blockRangeText(block)}</p></div><Button variant="outline" class="min-h-11" onclick={() => openEditBlock(block)}>수정</Button></div>
+        {:else}<p class="text-muted-foreground mt-3 text-sm">등록한 개인 일정이 없습니다.</p>{/each}
+      </section>
     {/if}
   {/if}
 </div>
 
 <!-- 일정 상세 -->
 <Dialog.Root open={detailEvent !== null} onOpenChange={(open) => !open && (detailEvent = null)}>
-  <Dialog.Content class="sm:max-w-md">
+  <Dialog.Content class="max-h-[90dvh] overflow-y-auto sm:max-w-md">
     {#if detailEvent}
       <Dialog.Header>
         <div class="flex items-center gap-2">
@@ -672,7 +664,7 @@
       </Dialog.Header>
       <div class="grid gap-3 text-sm">
         <div class="bg-muted/50 grid gap-1 rounded-xl px-4 py-3">
-          <p class="font-semibold">{formatDateTime(detailEvent.event.startAt)} – {timeText(detailEvent.event.endAt)}</p>
+          <p class="font-semibold">{formatDateTime(detailEvent.event.startAt)} – {dayKey(new Date(detailEvent.event.startAt)) === dayKey(new Date(detailEvent.event.endAt)) ? timeText(detailEvent.event.endAt) : formatDateTime(detailEvent.event.endAt)}</p>
           <p class="text-muted-foreground">{detailEvent.event.production.title}</p>
           {#if detailEvent.event.location}
             <p class="text-muted-foreground">장소 · {detailEvent.event.location}</p>
@@ -708,7 +700,7 @@
 
 <!-- 스케줄 등록 -->
 <Dialog.Root bind:open={addOpen}>
-  <Dialog.Content class="sm:max-w-md">
+  <Dialog.Content class="max-h-[90dvh] overflow-y-auto sm:max-w-md">
     <Dialog.Header>
       <Dialog.Title>{editingBlock ? "개인 일정 수정" : "스케줄 등록"}</Dialog.Title>
       <Dialog.Description>
@@ -759,16 +751,20 @@
             </Select.Root>
           </div>
           <div class="grid gap-2">
-            <Label for="evDate">날짜</Label>
-            <Input id="evDate" type="date" bind:value={formStartDate} required oninput={() => clearConflicts()} />
+            <Label for="evDate">시작일</Label>
+            <Input id="evDate" type="date" bind:value={formStartDate} required oninput={(event) => { const value = event.currentTarget.value; if (!formEndDate || formEndDate < value) formEndDate = value; clearConflicts(); }} />
+          </div>
+          <div class="grid gap-2">
+            <Label for="evEndDate">종료일</Label>
+            <Input id="evEndDate" type="date" bind:value={formEndDate} min={formStartDate} required oninput={() => clearConflicts()} />
           </div>
           <div class="grid gap-2">
             <Label for="evStart">시작</Label>
-            <Input id="evStart" type="time" bind:value={formStart} oninput={() => clearConflicts()} />
+            <Input id="evStart" type="time" bind:value={formStart} required oninput={() => clearConflicts()} />
           </div>
           <div class="grid gap-2">
             <Label for="evEnd">종료</Label>
-            <Input id="evEnd" type="time" bind:value={formEnd} oninput={() => clearConflicts()} />
+            <Input id="evEnd" type="time" bind:value={formEnd} required oninput={() => clearConflicts()} />
           </div>
         </div>
         <div class="grid gap-2">
