@@ -251,7 +251,7 @@
   {#if loading}<p class="bg-card rounded-2xl border p-8" role="status">연습 자료를 불러오고 있습니다…</p>
   {:else if error}<section class="bg-card rounded-2xl border p-6" role="alert"><p>{error}</p><Button class="mt-4" onclick={() => { loading = true; error = ""; void load(pid); }}>다시 불러오기</Button></section>
   {:else if board}
-    <p class="bg-primary/5 text-muted-foreground rounded-xl border p-3 text-sm">이 기기에서만 재생되는 개인 연습입니다. 다른 참여자의 재생이나 실제 공연 진행 상태는 바뀌지 않습니다.</p>
+    <p class="bg-primary/5 text-muted-foreground rounded-xl border p-3 text-sm">내 기기에서만 재생되는 개인 연습 화면입니다.</p>
     <div class="grid gap-3 sm:grid-cols-3">
       <label class="grid gap-1 text-sm font-medium">연습할 대본<select class="bg-background min-h-11 w-full rounded-lg border px-3" value={selectedScript} onchange={(event) => { selectedScript = event.currentTarget.value; selectedScene = ""; selectedCharacter = ""; rowLimit = 100; playing = false; seek(0); editing = null; }}><option value="" disabled>대본 선택</option>{#each scripts as script (script.id)}<option value={script.id}>{script.title}</option>{/each}</select></label>
       <label class="grid gap-1 text-sm font-medium">장면 · 반복 구간<select class="bg-background min-h-11 w-full rounded-lg border px-3" value={selectedScene} onchange={(event) => { selectedScene = event.currentTarget.value; rowLimit = 100; playing = false; const first = timeline.items.find((item) => !selectedScene || item.sceneId === selectedScene); seek(first?.startMs ?? 0); }}><option value="">전체 공연</option>{#each scenes as scene (scene.id)}<option value={scene.id}>{scene.act.title} · {scene.title}</option>{/each}</select></label>
@@ -279,7 +279,7 @@
             <div class="grid grid-cols-3 gap-2"><Button variant="outline" class="min-h-11" onclick={() => step(-1)}>이전 대사</Button><Button class="min-h-11" onclick={togglePlay}>{playing ? "일시정지" : "연습 재생"}</Button><Button variant="outline" class="min-h-11" onclick={() => step(1)}>다음 대사</Button></div>
             <div class="flex flex-wrap items-center gap-3 text-sm"><label class="flex min-h-11 items-center gap-2"><input type="checkbox" bind:checked={repeat} />선택 구간 반복</label><label class="flex min-h-11 items-center gap-2"><input type="checkbox" bind:checked={sound} />미디어 소리</label><label class="ms-auto flex items-center gap-2">속도<select class="bg-background min-h-11 rounded-lg border px-2" bind:value={speed}>{#each [0.5, 0.75, 1, 1.25, 1.5] as rate (rate)}<option value={rate}>{rate}×</option>{/each}</select></label></div>
             <Button variant="outline" class="min-h-11 w-full" onclick={project}>배경 · 대사만 전체화면으로 보기</Button>
-            <p class="text-muted-foreground text-xs">전체화면에는 배경과 대사·가사만 표시됩니다. 스태프 지시와 내부 메모는 표시하지 않습니다. 실제 상영 전 자막과 미디어를 검수해 주세요.</p>
+            <p class="text-muted-foreground text-xs">전체화면에는 배경과 대사·가사만 표시됩니다.</p>
           </div>
           {#if mediaError}<p role="alert" class="text-destructive rounded-xl border p-3 text-sm">{mediaError}</p>{/if}
         </section>
@@ -290,7 +290,7 @@
         </aside>
       </div>
       <section class="bg-card overflow-hidden rounded-2xl border">
-        <header class="flex flex-wrap items-center justify-between gap-2 border-b p-4"><h2 class="font-bold">대사 · 큐 시간표</h2><span class="text-muted-foreground text-xs">{filteredItems.length}개 항목 · 자동/추정 {estimatedCount}개</span><p class="text-muted-foreground w-full text-xs">시간 미지정 항목은 자동 배치됩니다. 대사는 기본 8초, 큐는 기본 30초이며 확정 시간이 아닙니다. 시간 수정으로 실제 시작·길이를 지정할 수 있습니다.</p></header>
+        <header class="flex flex-wrap items-center justify-between gap-2 border-b p-4"><h2 class="font-bold">대사 · 큐 시간표</h2><span class="text-muted-foreground text-xs">{filteredItems.length}개 항목 · 자동/추정 {estimatedCount}개</span><p class="text-muted-foreground w-full text-xs">시간이 지정되지 않은 항목은 자동으로 배치됩니다. 시간 수정으로 시작·길이를 지정할 수 있습니다.</p></header>
         <div class="divide-y">{#each filteredItems.slice(0, rowLimit) as item (item.id)}<article class="grid min-w-0 gap-2 p-4 sm:grid-cols-[105px_minmax(0,1fr)_auto]" class:bg-muted={item.startMs <= nowMs && nowMs < item.startMs + item.durationMs}><button class="text-primary min-h-11 text-start font-mono text-sm" onclick={() => seek(item.startMs)} aria-label={`${clock(item.startMs)} 시점으로 이동`}>{clock(item.startMs)}</button><div class="min-w-0"><p class="text-muted-foreground text-xs">{item.sceneTitle} · {item.kind === "cue" ? `${item.cue?.cueNumber} · ${board.tracks.find((track) => track.id === item.cue?.trackId)?.name ?? "큐"}` : item.block?.character?.name ?? "지문/메모"}{item.estimated ? " · 자동/추정" : " · 시간 지정"}</p><p class="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed">{item.block?.text ?? item.cue?.content}</p><p class="text-muted-foreground mt-1 text-xs">길이 {item.durationMs / 1000}초{item.cue?.asset ? ` · ${item.cue.asset.kind === "IMAGE" ? "배경 이미지" : item.cue.asset.kind === "VIDEO" ? "영상" : "음원"} 연결됨` : ""}</p></div>{#if canEdit(item)}<Button variant="outline" class="min-h-11 self-start" onclick={() => openEditor(item)}>시간 수정</Button>{/if}</article>{/each}</div>
         {#if filteredItems.length > rowLimit}<div class="border-t p-3"><Button variant="outline" class="min-h-11 w-full" onclick={() => rowLimit += 100}>다음 100개 보기</Button></div>{/if}
       </section>
