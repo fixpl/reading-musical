@@ -18,7 +18,12 @@ coverage/
 # Runtime asset bodies are local/persistent data, not source code.
 .asset-objects/
 
-# Documentation and test sources are intentionally kept local.
+# Keep local documentation and legacy tests private. Root quality gates must
+# include their two runtime dependencies in a clean checkout.
 docs/
-tests/
+tests/*
+!tests/run-quality.cjs
+!tests/smoke/
+tests/smoke/*
+!tests/smoke/performance-timeline-contract.cjs
 PRD.md

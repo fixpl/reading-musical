@@ -10,7 +10,9 @@
     "backend:prisma:status": "npm --prefix backend run prisma:status",
     "frontend:dev": "npm --prefix frontend run dev",
     "frontend:build": "npm --prefix frontend run build",
-    "check": "npm --prefix backend run build && npm --prefix frontend run check",
+    "check": "node tests/run-quality.cjs check",
+    "test": "node tests/run-quality.cjs test",
+    "build": "node tests/run-quality.cjs build",
     "qa:prd": "node tests/smoke/prd-consistency-smoke.cjs",
     "qa:api-boundary": "node tests/smoke/api-boundary-smoke.cjs",
     "qa:api-smoke": "node tests/smoke/api-contract-smoke.cjs",
@@ -25,6 +27,5 @@
   "devDependencies": {
     "playwright": "^1.61.1",
     "socket.io-client": "^4.8.3"
-  },
-  "packageManager": "pnpm@10.33.0+sha512.10568bb4a6afb58c9eb3630da90cc9516417abebd3fabbe6739f0ae795728da1491e9db5a544c76ad8eb7570f5c4bb3d6c637b2cb41bfdcdb47fa823c8649319"
+  }
 }
