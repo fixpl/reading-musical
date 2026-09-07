@@ -25,6 +25,7 @@
     sceneId: string | null;
     character?: { id: string; name: string } | null;
     durationSec?: number | null;
+    startMs?: number | null;
   };
 
   type ScriptBlock = {
@@ -63,6 +64,7 @@
     onDeleteCue,
     onResizeCue,
     onReorderCue,
+    onMoveCue,
     onMoveBlock
   }: {
     scenes: Scene[];
@@ -77,6 +79,7 @@
     onDeleteCue?: (cueId: string) => void;
     onResizeCue?: (cueId: string, durationSec: number) => void;
     onReorderCue?: (cueId: string, sceneId: string | null, orderedTrackCueIds: string[]) => void;
+    onMoveCue?: (cueId: string, startMs: number) => void;
     onMoveBlock?: (blockId: string, startMs: number | null, durationMs: number | null) => void;
   } = $props();
 
@@ -203,13 +206,18 @@
 
   const blockEndMin = $derived(blockClips.reduce((end, clip) => Math.max(end, (clip.startMs + clip.durationMs) / 60000), 0));
 
+  // 시작 시각이 지정된 큐도 실제 시간 눈금에 놓이므로 전체 길이 계산에 포함한다.
+  const cueEndMin = $derived(
+    cues.reduce((end, cue) => (cue.startMs != null ? Math.max(end, (cue.startMs + effSec(cue) * 1000) / 60000) : end), 0)
+  );
+
   // ── 배경 영상 — 연결되면 영상이 재생의 기준 시계가 된다(실시간 고정).
   let videoEl = $state<HTMLVideoElement | null>(null);
   let videoDurationSec = $state<number | null>(null);
   let videoMuted = $state(true);
 
   const total = $derived(
-    Math.max(segmentsTotal, blockEndMin, background && videoDurationSec ? videoDurationSec / 60 : 0)
+    Math.max(segmentsTotal, blockEndMin, cueEndMin, background && videoDurationSec ? videoDurationSec / 60 : 0)
   );
 
   const actBands = $derived.by(() => {
@@ -324,14 +332,19 @@
     if (list.length === 0) return [];
     // 먼저 트랙 전체 순서로 위치를 계산한 뒤 인물별로 거른다.
     // 그래야 인물 레인을 펼쳐도 각 큐가 장면 시작점으로 몰리지 않고 원래 순서를 유지한다.
+    // 시작 시각(startMs)이 지정된 큐는 대본 블록과 같은 실제 시간 눈금에 놓고,
+    // 미지정 큐는 앞 큐 끝에 이어붙인다(점선으로 표시).
     let cursorMin = 0;
     const clips = list.map((cue) => {
+      const timed = cue.startMs != null && Number.isFinite(cue.startMs);
+      const leftMin = timed ? cue.startMs! / 60000 : seg.start + cursorMin;
       const clip = {
         cue,
-        left: (seg.start + cursorMin) * PXM,
+        timed,
+        left: leftMin * PXM,
         width: Math.max(21, (effSec(cue) / 60) * PXM - 3)
       };
-      cursorMin += layoutSec(cue) / 60;
+      cursorMin = Math.max(cursorMin, leftMin + layoutSec(cue) / 60 - seg.start);
       return clip;
     });
     return characterId === undefined
@@ -586,11 +599,12 @@
     if (changed && sec != null) onResizeCue?.(cueId, sec);
   }
 
-  // 클립을 끌어 순서(시간 위치) 재배치 — 큐엔 절대 타임코드가 없어 이동=순서 변경.
+  // 클립을 끌어 위치를 바꾼다 — 시간 지정 큐는 시작 시각(startMs)을, 미지정 큐는 순서를 바꾼다.
   let clipDrag = $state<{ cueId: string; trackId: string; startX: number; dx: number; left: number; width: number; moved: boolean } | null>(null);
 
   function clipDragStart(event: PointerEvent, cue: Cue, left: number, width: number) {
-    if (!onReorderCue || !editableSet.has(cue.trackId)) return;
+    if (!editableSet.has(cue.trackId)) return;
+    if (cue.startMs != null ? !onMoveCue : !onReorderCue) return;
     clipDrag = { cueId: cue.id, trackId: cue.trackId, startX: event.clientX, dx: 0, left, width, moved: false };
     try {
       (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
@@ -610,6 +624,13 @@
     clipDrag = null;
     if (!d.moved) {
       pickCue(cue, seg); // 거의 안 움직였으면 클릭(선택)으로 처리
+      return;
+    }
+    // 시간 지정 큐는 놓은 위치가 곧 시작 시각 — 5초 단위로 맞춰 저장한다.
+    if (cue.startMs != null && onMoveCue) {
+      const minutes = Math.max(0, (d.left + d.dx) / PXM);
+      const startMs = Math.round((minutes * 60) / 5) * 5 * 1000;
+      onMoveCue(cue.id, startMs);
       return;
     }
     // 이 트랙의 모든 클립 위치를 모아, 끈 클립은 새 위치로 두고 왼쪽 기준으로 다시 정렬 → 새 순서.
@@ -1320,19 +1341,20 @@
                       <button
                         type="button"
                         class="absolute inset-y-1 flex items-center gap-1 overflow-hidden rounded-md border px-1.5 text-[11px] whitespace-nowrap
-                          {canAdd && onReorderCue ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'}
+                          {canAdd && (onReorderCue || onMoveCue) ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'}
                           {selected ? 'outline-2 outline-offset-1' : ''}"
                         style={`left:${clip.left}px;width:${clip.width}px;--clip:${color};
-                          ${canAdd && onReorderCue ? "touch-action:none;" : ""}
+                          ${canAdd && (onReorderCue || onMoveCue) ? "touch-action:none;" : ""}
+                          border-style:${clip.timed ? "solid" : "dashed"};
                           transform:translateX(${dragging ? clipDrag!.dx : 0}px);${dragging ? "z-index:30;opacity:.85;" : ""}
                           border-color:color-mix(in srgb, ${color} ${active || selected ? "100" : "55"}%, transparent);
                           background:color-mix(in srgb, ${color} ${active ? "30" : "14"}%, var(--card));
                           ${selected ? `outline-color:${color};` : ""}`}
-                        title={`${clip.cue.cueNumber} · ${track.name}${clip.cue.character ? ` · ${clip.cue.character.name}` : ""} — ${clip.cue.content}`}
-                        onclick={canAdd && onReorderCue ? undefined : () => pickCue(clip.cue, seg)}
-                        onpointerdown={canAdd && onReorderCue ? (e) => clipDragStart(e, clip.cue, clip.left, clip.width) : undefined}
-                        onpointermove={canAdd && onReorderCue ? clipDragMove : undefined}
-                        onpointerup={canAdd && onReorderCue ? (e) => clipDragEnd(e, clip.cue, seg) : undefined}
+                        title={`${clip.cue.cueNumber} · ${track.name}${clip.cue.character ? ` · ${clip.cue.character.name}` : ""} — ${clip.cue.content}${clip.timed ? ` (${fmt(clip.left / PXM)} 시작)` : ""}`}
+                        onclick={canAdd && (onReorderCue || onMoveCue) ? undefined : () => pickCue(clip.cue, seg)}
+                        onpointerdown={canAdd && (onReorderCue || onMoveCue) ? (e) => clipDragStart(e, clip.cue, clip.left, clip.width) : undefined}
+                        onpointermove={canAdd && (onReorderCue || onMoveCue) ? clipDragMove : undefined}
+                        onpointerup={canAdd && (onReorderCue || onMoveCue) ? (e) => clipDragEnd(e, clip.cue, seg) : undefined}
                       >
                         <span class="shrink-0 font-mono text-[10.5px] font-bold" style={`color:${color};`}>{clip.cue.cueNumber}</span>
                         {#if clip.cue.character}
@@ -1380,6 +1402,7 @@
                           class="absolute inset-y-[3px] flex cursor-pointer items-center gap-1 overflow-hidden rounded-md border px-1.5 text-[10.5px] whitespace-nowrap
                             {selected ? 'outline-2 outline-offset-1' : ''}"
                           style={`left:${clip.left}px;width:${clip.width}px;
+                            border-style:${clip.timed ? "solid" : "dashed"};
                             border-color:color-mix(in srgb, ${color} ${active || selected ? "100" : "55"}%, transparent);
                             background:color-mix(in srgb, ${color} ${active ? "30" : "12"}%, var(--card));
                             ${selected ? `outline-color:${color};` : ""}`}
@@ -1412,11 +1435,9 @@
     </div>
 
     <p class="text-muted-foreground/60 text-center text-[11.5px]">
-      상단 트랙 버튼은 큐 선택이 아니라 강조 필터입니다 · 위치는 저장된 큐 순서와 예상 길이를 바탕으로 한 배치이며 절대 타임코드는 아닙니다<br class="hidden sm:block" />
-      짧은 큐는 겹치지 않도록 최소 30초 칸으로 표시합니다 ·
-      미입력 큐는 30초로 계산하며 트랙 담당자는 자기 큐만 수정할 수 있습니다{onAddCue
-        ? " · 빈 레인을 클릭하면 그 장면에 큐가 추가됩니다"
-        : ""}{canEditBlocks ? " · 대본 레인의 블록은 끌어서 옮기고 끝을 끌어 길이를 조절합니다" : ""}
+      실선 큐는 지정된 시각에, 점선 큐는 순서에 맞춰 자동으로 놓입니다 · 큐를 끌어 옮기고 오른쪽 끝을 끌어 길이를 조절합니다{onAddCue
+        ? " · 빈 레인을 누르면 큐를 추가합니다"
+        : ""}{canEditBlocks ? " · 대본 블록도 같은 방식으로 옮깁니다" : ""}
     </p>
   </div>
 

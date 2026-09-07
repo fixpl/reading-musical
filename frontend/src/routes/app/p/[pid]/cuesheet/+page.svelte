@@ -57,6 +57,7 @@
     scene: { id: string; title: string; order: number; act: { id: string; title: string; order: number } } | null;
     character: { id: string; name: string } | null;
     durationSec: number | null;
+    startMs?: number | null;
     asset?: CueAsset | null;
     author: { id: string; name: string };
   };
@@ -165,6 +166,8 @@
   let aiDraft = $state<AiDraft | null>(null);
   let aiStats = $state<AiStats | null>(null);
   let aiProgress = $state<{ done: number; total: number } | null>(null);
+  // 단일 조각 분석처럼 진행률 숫자가 없는 대기에도 경과 시간을 보여준다.
+  let aiElapsed = $state(0);
   // 적용 대상: "new"(새 대본) 또는 기존 스크립트 id
   let aiTarget = $state("new");
   let aiScripts = $state<Array<{ id: string; title: string }>>([]);
@@ -443,6 +446,19 @@
     }
   }
 
+  // 타임라인에서 시간 지정 클립을 끌어 시작 시각(ms)을 바꾼다.
+  async function studioMoveCue(cueId: string, startMs: number) {
+    try {
+      await apiRequest(`/productions/${pid}/cue-sheet/cues/${cueId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ startMs })
+      });
+      await load();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "시작 시각을 바꾸지 못했습니다");
+    }
+  }
+
   // 타임라인에서 클립을 끌어 순서(시간 위치)를 바꾼다.
   async function studioReorderCue(cueId: string, sceneId: string | null, orderedTrackCueIds: string[]) {
     try {
@@ -689,6 +705,10 @@
     }
     aiBusy = true;
     aiProgress = null;
+    aiElapsed = 0;
+    const elapsedTimer = setInterval(() => {
+      aiElapsed += 1;
+    }, 1000);
     let done = false;
     // 긴 대본은 조각으로 나눠 처리하므로 넉넉히 기다린다. 그래도 안 끝나면 중단.
     const controller = new AbortController();
@@ -727,6 +747,7 @@
       }
     } finally {
       clearTimeout(timer);
+      clearInterval(elapsedTimer);
       aiBusy = false;
       aiProgress = null;
     }
@@ -918,6 +939,7 @@
         onDeleteCue={canEditSomething ? studioDeleteCue : undefined}
         onResizeCue={canEditSomething ? studioResizeCue : undefined}
         onReorderCue={canEditSomething ? studioReorderCue : undefined}
+        onMoveCue={canEditSomething ? studioMoveCue : undefined}
         onMoveBlock={canManage ? studioMoveBlock : undefined}
         onOpenScript={openScriptScene}
       />
@@ -1266,7 +1288,7 @@
                   {#if aiProgress && aiProgress.total > 1}
                     {aiProgress.done}/{aiProgress.total} 조각 처리했어요
                   {:else}
-                    잠시만요, 대본을 읽고 있어요…
+                    대본을 읽고 있어요… {aiElapsed}초
                   {/if}
                 </p>
               </div>
@@ -1282,6 +1304,10 @@
                   class="bg-primary h-full rounded-full transition-all duration-300"
                   style={`width: ${Math.round((aiProgress.done / aiProgress.total) * 100)}%`}
                 ></div>
+              </div>
+            {:else}
+              <div class="bg-border h-1.5 overflow-hidden rounded-full">
+                <div class="bg-primary h-full w-1/3 animate-pulse rounded-full"></div>
               </div>
             {/if}
           </div>
