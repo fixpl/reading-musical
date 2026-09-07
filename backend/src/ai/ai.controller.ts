@@ -62,10 +62,15 @@ export class AiController {
     res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("X-Accel-Buffering", "no");
-    const write = (obj: unknown) => res.write(`${JSON.stringify(obj)}\n`);
+    const controller = new AbortController();
+    const onClose = () => controller.abort();
+    res.on("close", onClose);
+    const write = (obj: unknown) => {
+      if (!res.destroyed && !res.writableEnded) res.write(`${JSON.stringify(obj)}\n`);
+    };
     try {
-      const result = await this.aiService.generateCueDraft(productionId, dto, user, (done, total) =>
-        write({ type: "progress", done, total })
+      const result = await this.aiService.generateCueDraft(productionId, dto, user,
+        (done, total) => write({ type: "progress", done, total }), controller.signal
       );
       write({ type: "result", ...result });
     } catch (error) {
@@ -74,7 +79,8 @@ export class AiController {
         : 500;
       write({ type: "error", status, message: error instanceof Error ? error.message : "초안을 만들지 못했습니다" });
     } finally {
-      res.end();
+      res.off("close", onClose);
+      if (!res.destroyed && !res.writableEnded) res.end();
     }
   }
 
