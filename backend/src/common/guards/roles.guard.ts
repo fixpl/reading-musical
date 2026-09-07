@@ -40,6 +40,20 @@ export class RolesGuard implements CanActivate {
     }
 
     if (platformRoles?.includes(user.platformRole)) {
+      // A platform role is not a cross-organization production grant.
+      // Only production-scoped handlers have productionRoles metadata; an
+      // /admin/users/:id parameter must never be treated as a production ID.
+      if (user.platformRole === "ORG_ADMIN" && productionRoles?.length) {
+        const productionId = this.getProductionId(request);
+        if (!productionId) throw new ForbiddenException("공연을 확인할 수 없습니다");
+        const [production, caller] = await Promise.all([
+          this.prisma.production.findUnique({ where: { id: productionId }, select: { organizationId: true } }),
+          this.prisma.user.findUnique({ where: { id: user.id }, select: { organizationId: true } })
+        ]);
+        if (!caller?.organizationId || production?.organizationId !== caller.organizationId) {
+          throw new ForbiddenException("소속 조직의 공연만 관리할 수 있습니다");
+        }
+      }
       return true;
     }
 

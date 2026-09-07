@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
-import { ArrayMaxSize, IsArray, IsInt, IsOptional, IsString, IsUUID, Max, MaxLength, Min, MinLength } from "class-validator";
+import { ArrayMaxSize, ArrayUnique, IsArray, IsInt, IsOptional, IsString, IsUUID, Max, MaxLength, Min, MinLength } from "class-validator";
 
 export class CreateCueTrackDto {
   @ApiProperty({ description: "트랙 이름 — 부서 또는 사람" })
@@ -76,6 +76,13 @@ export class CreateTrackCueDto {
   @Max(3600)
   durationSec?: number | null;
 
+  @ApiPropertyOptional({ description: "공연 시작 기준 시각(ms), null이면 자동 배치" })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(86_400_000)
+  startMs?: number | null;
+
   @ApiPropertyOptional({ description: "첨부 미디어(영상·음원) Asset ID" })
   @IsOptional()
   @IsUUID()
@@ -125,6 +132,13 @@ export class UpdateTrackCueDto {
   @Max(3600)
   durationSec?: number | null;
 
+  @ApiPropertyOptional({ description: "공연 시작 기준 시각(ms), null이면 자동 배치" })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(86_400_000)
+  startMs?: number | null;
+
   @ApiPropertyOptional({ description: "첨부 미디어(영상·음원) Asset ID — null이면 해제" })
   @IsOptional()
   @IsUUID()
@@ -135,11 +149,12 @@ export class ReorderTrackCueDto {
   @ApiPropertyOptional({ description: "옮길 장면 ID — 생략하면 현재 장면 유지" })
   @IsOptional()
   @IsUUID()
-  sceneId?: string;
+  sceneId?: string | null;
 
   @ApiProperty({ description: "이 큐가 속한 트랙의 큐 ID를 새 순서대로 나열" })
   @IsArray()
   @ArrayMaxSize(4000)
+  @ArrayUnique()
   @IsUUID("4", { each: true })
   orderedTrackCueIds!: string[];
 }

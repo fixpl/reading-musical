@@ -134,7 +134,7 @@ const ASSET_POLICIES: Record<AssetPurpose, AssetPolicy> = {
     storagePrefix: "background"
   },
   [AssetPurpose.CUE_MEDIA]: {
-    // 영상·음악 트랙 큐에 붙는 파일 — mime으로 VIDEO/AUDIO를 가린다(resolveAssetKind).
+    // 타임라인의 배경 이미지·영상·음원. SVG/HTML은 실행 가능한 형식이므로 허용하지 않는다.
     kind: AssetKind.VIDEO,
     maxBytes: 500 * 1024 * 1024,
     allowedMimeTypes: [
@@ -147,7 +147,10 @@ const ASSET_POLICIES: Record<AssetPurpose, AssetPolicy> = {
       "audio/x-wav",
       "audio/mp4",
       "audio/aac",
-      "audio/x-m4a"
+      "audio/x-m4a",
+      "image/png",
+      "image/jpeg",
+      "image/webp"
     ],
     allowedExtensionsByMime: {
       "video/mp4": ["mp4", "m4v"],
@@ -159,7 +162,10 @@ const ASSET_POLICIES: Record<AssetPurpose, AssetPolicy> = {
       "audio/x-wav": ["wav"],
       "audio/mp4": ["m4a", "mp4"],
       "audio/aac": ["aac"],
-      "audio/x-m4a": ["m4a"]
+      "audio/x-m4a": ["m4a"],
+      "image/png": ["png"],
+      "image/jpeg": ["jpg", "jpeg"],
+      "image/webp": ["webp"]
     },
     storagePrefix: "cue-media"
   }
@@ -227,7 +233,7 @@ export class AssetsService {
   async listProductionMedia(productionId: string, user: RequestUser) {
     await this.assertMembership(productionId, user, VIEW_ROLES);
     return this.prisma.asset.findMany({
-      where: { productionId, kind: { in: [AssetKind.AUDIO, AssetKind.VIDEO] } },
+      where: { productionId, kind: { in: [AssetKind.AUDIO, AssetKind.VIDEO, AssetKind.IMAGE] } },
       orderBy: { createdAt: "desc" },
       select: { id: true, kind: true, mime: true, sizeBytes: true, storageKey: true, createdAt: true }
     });
@@ -319,7 +325,7 @@ export class AssetsService {
     if (purpose === AssetPurpose.RUN_SHEET_EXPORT) return VIEW_ROLES;
     if (purpose === AssetPurpose.CHECKLIST_EVIDENCE) return CHECKLIST_EVIDENCE_ROLES;
     if (purpose === AssetPurpose.BACKGROUND_VIDEO) return STAGE_EDIT_ROLES;
-    if (purpose === AssetPurpose.CUE_MEDIA) return STAGE_EDIT_ROLES;
+    if (purpose === AssetPurpose.CUE_MEDIA) return [...STAGE_EDIT_ROLES, ProductionRole.MUSIC_DIRECTOR];
     return VIEW_ROLES;
   }
 
@@ -331,12 +337,14 @@ export class AssetsService {
       return AssetKind.IMAGE;
     }
     if (purpose === AssetPurpose.CUE_MEDIA) {
-      return mimeType.startsWith("audio/") ? AssetKind.AUDIO : AssetKind.VIDEO;
+      return mimeType.startsWith("image/") ? AssetKind.IMAGE : mimeType.startsWith("audio/") ? AssetKind.AUDIO : AssetKind.VIDEO;
     }
     return policy.kind;
   }
 
   private async assertMembership(productionId: string, user: RequestUser, roles: ProductionRole[]) {
+    const active = await this.prisma.production.findFirst({ where: { id: productionId, deletedAt: null }, select: { id: true } });
+    if (!active) throw new NotFoundException("공연을 찾을 수 없어요");
     if (await isProductionAdmin(this.prisma, user, productionId)) {
       return;
     }

@@ -1,4 +1,4 @@
-import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import { PlatformRole, Prisma, ProductionRole } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import type { RequestUser } from "../common/types/request-user";
@@ -77,7 +77,7 @@ export class CueSheetService {
           title: true,
           order: true,
           summary: true,
-          act: { select: { id: true, title: true, order: true } },
+          act: { select: { id: true, title: true, order: true, scriptId: true, script: { select: { title: true } } } },
           // 큐시트 중앙에서 대본(대사·지문)과 큐를 함께 보여주기 위해 장면별 본문도 싣는다.
           blocks: {
             orderBy: { order: "asc" },
@@ -177,6 +177,7 @@ export class CueSheetService {
     await this.assertScene(productionId, dto.sceneId);
     await this.assertCharacter(productionId, dto.characterId);
     await this.assertMediaAsset(productionId, dto.assetId);
+    this.assertCueTiming(dto.startMs, dto.durationSec);
 
     const [order, count] = await Promise.all([
       this.nextCueOrder(trackId),
@@ -195,6 +196,7 @@ export class CueSheetService {
         note: dto.note?.trim() || null,
         characterId: dto.characterId ?? null,
         durationSec: dto.durationSec ?? null,
+        startMs: dto.startMs ?? null,
         assetId: dto.assetId ?? null,
         order,
         authorId: user.id
@@ -216,6 +218,10 @@ export class CueSheetService {
       await this.assertMediaAsset(productionId, dto.assetId);
     }
 
+    this.assertCueTiming(
+      dto.startMs === undefined ? cue.startMs : dto.startMs,
+      dto.durationSec === undefined ? cue.durationSec : dto.durationSec
+    );
     return this.prisma.trackCue.update({
       where: { id: cue.id },
       data: {
@@ -226,6 +232,7 @@ export class CueSheetService {
         sceneId: dto.sceneId === undefined ? undefined : dto.sceneId,
         characterId: dto.characterId === undefined ? undefined : dto.characterId,
         durationSec: dto.durationSec === undefined ? undefined : dto.durationSec,
+        startMs: dto.startMs === undefined ? undefined : dto.startMs,
         assetId: dto.assetId === undefined ? undefined : dto.assetId
       },
       include: CUE_INCLUDE
@@ -233,7 +240,7 @@ export class CueSheetService {
   }
 
   /**
-   * 타임라인에서 큐를 끌어 순서를 바꾼다(큐엔 절대 시간이 없어 이동=순서 재배치).
+   * 큐의 표시 순서를 변경한다. 명시적으로 저장된 startMs는 이 작업으로 덮어쓰지 않는다.
    * 옮긴 큐의 장면을 바꾸고, 그 트랙의 큐 순서(order)를 넘겨받은 배열대로 다시 매긴다.
    */
   async reorderCue(productionId: string, cueId: string, dto: ReorderTrackCueDto, user: RequestUser) {
@@ -251,11 +258,14 @@ export class CueSheetService {
     });
     const orderValues = trackCues.map((c) => c.order).sort((a, b) => a - b);
     const trackIds = new Set(trackCues.map((c) => c.id));
-    const sequence = dto.orderedTrackCueIds.filter((id) => trackIds.has(id));
+    if (new Set(dto.orderedTrackCueIds).size !== dto.orderedTrackCueIds.length || dto.orderedTrackCueIds.some((id) => !trackIds.has(id))) {
+      throw new BadRequestException("같은 트랙의 큐를 중복 없이 지정해 주세요");
+    }
+    const sequence = [...dto.orderedTrackCueIds];
     for (const c of trackCues) if (!sequence.includes(c.id)) sequence.push(c.id); // 누락분은 뒤에 보강
 
     await this.prisma.$transaction(async (tx) => {
-      if (dto.sceneId) {
+      if (dto.sceneId !== undefined) {
         await tx.trackCue.update({ where: { id: cue.id }, data: { sceneId: dto.sceneId } });
       }
       for (let i = 0; i < sequence.length; i += 1) {
@@ -346,7 +356,7 @@ export class CueSheetService {
     const scenes = await this.prisma.scene.findMany({
       where: { act: { scriptId: script.id } },
       orderBy: [{ act: { order: "asc" } }, { order: "asc" }],
-      select: { id: true, blocks: { orderBy: { order: "asc" }, select: { type: true, text: true, characterId: true } } }
+      select: { id: true, blocks: { orderBy: { order: "asc" }, select: { type: true, text: true, characterId: true, startMs: true, durationMs: true } } }
     });
 
     let track = await this.prisma.cueTrack.findFirst({ where: { productionId, name: "배우" } });
@@ -368,6 +378,8 @@ export class CueSheetService {
       content: string;
       trigger: string | null;
       characterId: string | null;
+      startMs: number | null;
+      durationSec: number | null;
       order: number;
       authorId: string;
     }[] = [];
@@ -380,6 +392,8 @@ export class CueSheetService {
         const text = block.text.trim();
         if (!text) continue;
         const roleMatch = roles.find((role) => text.includes(role.name));
+        const durationSec = block.durationMs === null ? null : Math.ceil(block.durationMs / 1000);
+        this.assertCueTiming(block.startMs, durationSec);
         count += 1;
         data.push({
           productionId,
@@ -389,6 +403,8 @@ export class CueSheetService {
           content: text.slice(0, 500),
           trigger: lastDialogue ? lastDialogue.slice(0, 60) : null,
           characterId: block.characterId ?? roleMatch?.id ?? null,
+          startMs: block.startMs,
+          durationSec,
           order: order++,
           authorId: user.id
         });
@@ -454,6 +470,18 @@ export class CueSheetService {
     return { imported: toCreate.length };
   }
 
+  private assertCueTiming(startMs: number | null | undefined, durationSec: number | null | undefined) {
+    if (startMs != null && (!Number.isInteger(startMs) || startMs < 0 || startMs > 86_400_000)) {
+      throw new BadRequestException("시작 시각은 0~24시간 범위의 정수 밀리초여야 합니다");
+    }
+    if (durationSec != null && (!Number.isInteger(durationSec) || durationSec < 1 || durationSec > 3600)) {
+      throw new BadRequestException("큐 길이는 1~3600 범위의 정수 초여야 합니다");
+    }
+    if (startMs != null && durationSec != null && startMs + durationSec * 1000 > 86_400_000) {
+      throw new BadRequestException("큐 종료 시각은 공연 시작 후 24시간 이내여야 합니다");
+    }
+  }
+
   private cueTypeLabel(cueType: string) {
     const labels: Record<string, string> = {
       START: "재생",
@@ -495,7 +523,7 @@ export class CueSheetService {
   }
 
   private async findCueOrThrow(productionId: string, cueId: string) {
-    const cue = await this.prisma.trackCue.findFirst({ where: { id: cueId, productionId } });
+    const cue = await this.prisma.trackCue.findFirst({ where: { id: cueId, productionId, deletedAt: null } });
     if (!cue) {
       throw new NotFoundException("큐를 찾을 수 없습니다");
     }
@@ -514,7 +542,7 @@ export class CueSheetService {
   private async assertMediaAsset(productionId: string, assetId: string | null | undefined) {
     if (!assetId) return;
     const asset = await this.prisma.asset.findFirst({
-      where: { id: assetId, productionId, kind: { in: ["AUDIO", "VIDEO"] } },
+      where: { id: assetId, productionId, kind: { in: ["AUDIO", "VIDEO", "IMAGE"] } },
       select: { id: true }
     });
     if (!asset) {
@@ -525,7 +553,7 @@ export class CueSheetService {
   private async assertScene(productionId: string, sceneId?: string | null) {
     if (!sceneId) return;
     const scene = await this.prisma.scene.findFirst({
-      where: { id: sceneId, act: { script: { productionId } } },
+      where: { id: sceneId, act: { script: { productionId, deletedAt: null } } },
       select: { id: true }
     });
     if (!scene) {
@@ -546,6 +574,8 @@ export class CueSheetService {
 
   /** 제작진·운영자는 전체("ALL"), 그 외에는 본인이 담당자인 트랙 ID 목록. */
   private async resolveEditableTrackIds(productionId: string, user: RequestUser): Promise<"ALL" | string[]> {
+    const active = await this.prisma.production.findFirst({ where: { id: productionId, deletedAt: null }, select: { id: true } });
+    if (!active) throw new NotFoundException("공연을 찾을 수 없습니다");
     if (await isProductionAdmin(this.prisma, user, productionId)) {
       return "ALL";
     }
@@ -554,7 +584,7 @@ export class CueSheetService {
       select: { id: true, roles: { select: { role: true } } }
     });
     if (!membership) {
-      return [];
+      throw new ForbiddenException("참여 중인 공연만 열 수 있습니다");
     }
     if (membership.roles.some((role) => STAFF_ROLES.includes(role.role))) {
       return "ALL";

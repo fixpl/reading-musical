@@ -1116,6 +1116,8 @@ model TrackCue {
   character Role? @relation(fields: [characterId], references: [id])
   // 예상 소요 초 — QLab처럼 큐마다 duration을 두어 타임라인을 실제 시간에 가깝게 한다
   durationSec Int? @map("duration_sec")
+  // 공연 시작 기준 실제 시작 시각(ms). null은 미지정이며 화면의 자동 배치와 구분한다.
+  startMs Int? @map("start_ms")
   // 첨부 미디어(영상·음원) — 영상/음악 트랙 큐가 실제 파일을 가리킨다.
   assetId String? @map("asset_id")
   asset Asset? @relation(fields: [assetId], references: [id])
