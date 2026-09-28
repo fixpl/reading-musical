@@ -7,10 +7,12 @@ import { NotificationsModule } from "../notifications/notifications.module";
 import { PrismaModule } from "../prisma/prisma.module";
 import { ScriptsController } from "./scripts.controller";
 import { ScriptsService } from "./scripts.service";
+import { CompositionController } from "./composition.controller";
+import { CompositionService } from "./composition.service";
 
 @Module({
   imports: [PrismaModule, JwtModule.register({}), AssetsModule, NotificationsModule, MailModule],
-  controllers: [ScriptsController],
-  providers: [ScriptsService, RolesGuard]
+  controllers: [ScriptsController, CompositionController],
+  providers: [ScriptsService, CompositionService, RolesGuard]
 })
 export class ScriptsModule {}

@@ -6,6 +6,7 @@ import { JwtAuthGuard } from "../common/guards/jwt-auth.guard";
 import type { RequestUser } from "../common/types/request-user";
 import { AssetsService } from "./assets.service";
 import { CreateAssetDto } from "./dto";
+import { attachmentDisposition } from "./attachment-response";
 
 @ApiTags("assets")
 @ApiBearerAuth()
@@ -56,12 +57,16 @@ export class AssetObjectsController {
     @Query("action") action: string | undefined,
     @Query("expires") expires: string | undefined,
     @Query("signature") signature: string | undefined,
-    @Res() response: Response
+    @Res() response: Response,
+    @Query("download") download?: string
   ) {
     await this.assetsService.assertMockObjectAccess(assetId, "download", { action, expires, signature });
     const object = await this.assetsService.readMockObject(assetId);
     response.setHeader("x-reading-musical-asset-id", assetId);
-    response.setHeader("content-type", object.asset.mime);
+    response.setHeader("content-type", object.asset.mime === "text/plain" ? "text/plain; charset=utf-8" : object.asset.mime);
+    response.setHeader("content-disposition", attachmentDisposition(object.asset, download === "1"));
+    response.setHeader("x-content-type-options", "nosniff");
+    response.setHeader("cache-control", "private, no-store");
     response.setHeader("content-length", String(object.sizeBytes));
     response.status(200).send(object.body);
   }

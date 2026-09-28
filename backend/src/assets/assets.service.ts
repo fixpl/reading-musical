@@ -39,6 +39,17 @@ const VIEW_ROLES = [
 ];
 
 const ASSET_POLICIES: Record<AssetPurpose, AssetPolicy> = {
+  [AssetPurpose.PERFORMANCE_MATERIAL]: {
+    // 원본 악보는 추출/OCR 없이도 보관할 수 있다. 실행 가능한 SVG/HTML은 제외한다.
+    kind: AssetKind.DOCUMENT,
+    maxBytes: 50 * 1024 * 1024,
+    allowedMimeTypes: ["application/pdf", "image/png", "image/jpeg", "image/webp", "text/plain", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+    allowedExtensionsByMime: {
+      "application/pdf": ["pdf"], "image/png": ["png"], "image/jpeg": ["jpg", "jpeg"], "image/webp": ["webp"],
+      "text/plain": ["txt"], "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ["docx"]
+    },
+    storagePrefix: "performance-materials"
+  },
   [AssetPurpose.MUSIC_TRACK]: {
     kind: AssetKind.AUDIO,
     maxBytes: 200 * 1024 * 1024,
@@ -210,6 +221,7 @@ export class AssetsService {
         productionId: dto.productionId ?? null,
         kind,
         storageKey,
+        fileName: dto.fileName.split(/[\\/]/).pop()?.normalize("NFC").replace(/[\u0000-\u001f]/g, "").slice(0, 255) || "자료",
         mime: dto.mimeType,
         sizeBytes: dto.size,
         checksum
@@ -303,6 +315,16 @@ export class AssetsService {
     };
   }
 
+  /** 메타데이터만 만든 파일이나 중단된 업로드를 구간 첨부로 등록하지 않는다. */
+  async assertStoredObject(asset: { id: string; sizeBytes: number }) {
+    let fileStat;
+    try { fileStat = await stat(this.objectPath(asset.id)); }
+    catch { throw new BadRequestException("파일 업로드가 완료되지 않았습니다. 파일을 다시 올린 뒤 첨부하세요."); }
+    if (!fileStat.isFile() || asset.sizeBytes <= 0 || fileStat.size !== asset.sizeBytes) {
+      throw new BadRequestException("업로드된 파일 크기가 일치하지 않습니다. 파일을 다시 올려 주세요.");
+    }
+  }
+
   async readMockObject(assetId: string) {
     const asset = await this.prisma.asset.findUnique({ where: { id: assetId } });
     if (!asset) {
@@ -320,7 +342,7 @@ export class AssetsService {
 
   private rolesForPurpose(purpose: AssetPurpose) {
     if (purpose === AssetPurpose.MUSIC_TRACK) return MUSIC_EDIT_ROLES;
-    if (purpose === AssetPurpose.SCRIPT_IMPORT) return SCRIPT_EDIT_ROLES;
+    if (purpose === AssetPurpose.SCRIPT_IMPORT || purpose === AssetPurpose.PERFORMANCE_MATERIAL) return SCRIPT_EDIT_ROLES;
     if (purpose === AssetPurpose.STAGE_EXPORT) return STAGE_EDIT_ROLES;
     if (purpose === AssetPurpose.RUN_SHEET_EXPORT) return VIEW_ROLES;
     if (purpose === AssetPurpose.CHECKLIST_EVIDENCE) return CHECKLIST_EVIDENCE_ROLES;
@@ -333,7 +355,7 @@ export class AssetsService {
     if (purpose === AssetPurpose.STAGE_EXPORT && mimeType === "application/pdf") {
       return AssetKind.DOCUMENT;
     }
-    if (purpose === AssetPurpose.CHECKLIST_EVIDENCE && mimeType.startsWith("image/")) {
+    if ((purpose === AssetPurpose.CHECKLIST_EVIDENCE || purpose === AssetPurpose.PERFORMANCE_MATERIAL) && mimeType.startsWith("image/")) {
       return AssetKind.IMAGE;
     }
     if (purpose === AssetPurpose.CUE_MEDIA) {
