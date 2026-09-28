@@ -2,6 +2,9 @@
   "name": "reading-musical",
   "private": true,
   "scripts": {
+    "dev": "sh ./dev.sh",
+    "dev:check": "sh ./dev.sh check",
+    "dev:preview": "sh ./dev.sh preview",
     "backend:dev": "npm --prefix backend run start:dev",
     "backend:build": "npm --prefix backend run build",
     "backend:prisma:generate": "npm --prefix backend run prisma:generate",

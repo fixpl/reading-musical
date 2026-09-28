@@ -103,7 +103,14 @@ async function main() {
   // This does not replace Svelte type checking or a production bundle.
   const { compile } = require(require.resolve('svelte/compiler', { paths: [path.join(root, 'frontend')] }));
   let warnings = 0;
-  for (const relative of ['frontend/src/routes/app/schedule/+page.svelte', 'frontend/src/routes/app/p/[pid]/live/+page.svelte']) {
+  const svelteFiles = [
+    'frontend/src/routes/app/schedule/+page.svelte',
+    'frontend/src/routes/app/p/[pid]/live/+page.svelte',
+    'frontend/src/routes/+page.svelte',
+    'frontend/src/lib/components/landing/ProductPreview.svelte',
+    'frontend/src/lib/components/landing/InquiryForm.svelte'
+  ];
+  for (const relative of svelteFiles) {
     const filename = path.join(root, relative);
     const sourceText = fs.readFileSync(filename, 'utf8');
     for (const generate of ['client', 'server']) {
@@ -114,7 +121,8 @@ async function main() {
       }
     }
   }
-  console.log(`PASS: Svelte client/server syntax compilation (2 modified screens, ${warnings} compiler warnings). Full frontend typecheck/build remain separate gates.`);
+  console.log(`PASS: Svelte client/server syntax compilation (${svelteFiles.length} screens/components, ${warnings} compiler warnings). Full frontend typecheck/build remain separate gates.`);
   console.log('PASS: NVIDIA settings, AI timing normalization, missing/duplicate source rejection, exact timeline durations, server time bounds, multi-day calendar, and organization authorization. No database or external API called.');
 }
+require('./composition-ui-contract.cjs');
 main().catch((error) => { console.error(error); process.exitCode = 1; });

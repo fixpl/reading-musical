@@ -18,7 +18,7 @@ function buildApiServerUrl(externalUrl: string | undefined, apiPrefix: string): 
 }
 
 function parseOrigins(value: string | undefined): string[] {
-  return (value || "http://localhost:5173")
+  return (value || "http://localhost:5179,http://127.0.0.1:5179")
     .split(",")
     .map((origin) => origin.trim())
     .filter(Boolean);
@@ -90,7 +90,8 @@ async function bootstrap() {
     customSiteTitle: "Reading Musical API Docs"
   });
 
-  await app.listen(port);
+  // The local launcher sets HOST=127.0.0.1; container deployments keep the default.
+  await app.listen(port, config.get<string>("HOST") || "0.0.0.0");
 }
 
 bootstrap();

@@ -133,10 +133,14 @@ export class ScheduleService {
     const where: Prisma.ScheduleEventWhereInput = { productionId };
     const fromDate = this.parseOptionalDate(from, "from");
     const toDate = this.parseOptionalDate(to, "to");
+    if (fromDate && toDate && fromDate >= toDate) {
+      throw new BadRequestException("조회 종료 시각은 시작 시각보다 뒤여야 해요");
+    }
     if (fromDate || toDate) {
+      // Calendar and conflict checks both use the half-open interval [from, to).
       where.AND = [
-        fromDate ? { endAt: { gte: fromDate } } : {},
-        toDate ? { startAt: { lte: toDate } } : {}
+        fromDate ? { endAt: { gt: fromDate } } : {},
+        toDate ? { startAt: { lt: toDate } } : {}
       ];
     }
     return this.prisma.scheduleEvent.findMany({
@@ -215,7 +219,9 @@ export class ScheduleService {
   async updateEvent(productionId: string, eventId: string, dto: UpdateScheduleEventDto, user: RequestUser) {
     const event = await this.assertEvent(productionId, eventId);
     const eventType = this.resolveEventType(dto.type, dto.eventType, event.type);
-    await this.assertEditPermission(productionId, user, eventType);
+    // Check the existing event too: changing its type must not grant edit access.
+    await this.assertEditPermission(productionId, user, event.type);
+    if (eventType !== event.type) await this.assertEditPermission(productionId, user, eventType);
     const range =
       dto.startAt || dto.endAt
         ? this.parseRange(dto.startAt ?? event.startAt.toISOString(), dto.endAt ?? event.endAt.toISOString())
@@ -974,7 +980,7 @@ export class ScheduleService {
           userId: attendance.membership.user.id,
           productionId: attendance.event.productionId,
           type: "schedule.attendance_reminder",
-          payload: { path: ["attendanceId"], equals: attendance.id }
+          payload: { path: ["reminderKey"], equals: this.attendanceReminderKey(attendance) }
         },
         select: { id: true }
       }),
@@ -983,7 +989,7 @@ export class ScheduleService {
           userId: attendance.membership.user.id,
           productionId: attendance.event.productionId,
           templateKey: "schedule.attendance_reminder",
-          metadata: { path: ["attendanceId"], equals: attendance.id }
+          metadata: { path: ["reminderKey"], equals: this.attendanceReminderKey(attendance) }
         },
         select: { id: true }
       })
@@ -1260,20 +1266,23 @@ export class ScheduleService {
       }),
       this.prisma.attendance.findMany({
         where: {
-          membershipId: { in: uniqueMembershipIds },
+          // Membership IDs differ by production. Match the person across productions.
+          membership: { userId: { in: userIds } },
           status: { not: AttendanceStatus.DECLINED },
           eventId: ignoreEventId ? { not: ignoreEventId } : undefined,
           event: {
-            productionId,
+            production: { deletedAt: null },
             startAt: { lt: range.endAt },
             endAt: { gt: range.startAt }
           }
         },
-        include: { event: { select: { id: true, title: true, startAt: true, endAt: true } } }
+        include: {
+          membership: { select: { userId: true } },
+          event: { select: { id: true, productionId: true, title: true, startAt: true, endAt: true } }
+        }
       })
     ]);
     const byUser = new Map(memberships.map((membership) => [membership.userId, membership]));
-    const byMembership = new Map(memberships.map((membership) => [membership.id, membership]));
     const availabilityConflicts = blockedAvailabilities.flatMap((availability) => {
       const membership = byUser.get(availability.userId);
       if (!membership) return [];
@@ -1292,18 +1301,20 @@ export class ScheduleService {
       ];
     });
     const eventConflicts = overlappingAttendances.flatMap((attendance) => {
-      const membership = byMembership.get(attendance.membershipId);
+      const membership = byUser.get(attendance.membership.userId);
       if (!membership) return [];
+      const sameProduction = attendance.event.productionId === productionId;
       return [
         {
           membershipId: membership.id,
           userId: membership.userId,
           userName: membership.user.name,
           type: "EVENT" as const,
-          reason: attendance.event.title,
+          // Expose the busy interval, not another production's private title or ID.
+          reason: sameProduction ? attendance.event.title : "다른 공연 일정과 겹침",
           startAt: attendance.event.startAt,
           endAt: attendance.event.endAt,
-          resourceId: attendance.event.id
+          resourceId: sameProduction ? attendance.event.id : ""
         }
       ];
     });

@@ -63,6 +63,7 @@ try {
   }
   if (task === 'test') {
     run(path.join(root, 'tests/smoke/performance-timeline-contract.cjs'), [], root, 'performance timeline regression');
+    run(path.join(root, 'tests/smoke/local-dev-contract.mjs'), [], root, 'local launcher safety regression');
   }
   console.log(`\n[quality:${task}] PASS`);
 } catch (error) {

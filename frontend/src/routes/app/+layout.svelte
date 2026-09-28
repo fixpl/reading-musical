@@ -49,6 +49,7 @@
     pid
       ? [
           { title: "대시보드", url: `/app/p/${pid}`, icon: ClipboardListIcon, exact: true },
+          { title: "장·막 구성", url: `/app/p/${pid}/composition`, icon: NotebookPenIcon, exact: false },
           { title: "연습 · 시간표", url: `/app/p/${pid}/live`, icon: MicVocalIcon, exact: false },
           { title: "큐시트", url: `/app/p/${pid}/cuesheet`, icon: MusicIcon, exact: false },
           { title: "대본", url: `/app/p/${pid}/script`, icon: BookOpenIcon, exact: false },
@@ -309,10 +310,16 @@
         <span class="text-sm font-medium">{currentTitle}</span>
       </header>
       <div class="flex min-w-0 flex-1 flex-col gap-4 p-3 pt-4 pb-[calc(6rem+env(safe-area-inset-bottom))] sm:p-5 md:pb-5">
+        {#if pid && ['/script', '/manage/script', '/cuesheet', '/live'].some((suffix) => $page.url.pathname.startsWith(`/app/p/${pid}${suffix}`))}
+          <div class="flex flex-wrap items-center justify-between gap-3 rounded-xl border bg-card p-3 text-sm">
+            <div><p class="font-medium">장·막별로 공연을 구성하고 있나요?</p><p class="mt-1 text-xs leading-relaxed text-muted-foreground">새 구성 화면에서 구간별 대본·가사·등록 자료를 연결할 수 있습니다. 기존 대본과 큐시트는 그대로 보존됩니다.</p></div>
+            <a href={`/app/p/${pid}/composition`} class="shrink-0 rounded-md bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground focus-visible:outline-2">장·막 구성 열기</a>
+          </div>
+        {/if}
         {@render children()}
       </div>
-      <nav aria-label="모바일 빠른 메뉴" class="bg-background/95 fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t px-2 pb-[env(safe-area-inset-bottom)] backdrop-blur md:hidden">
-        {#each (pid ? [{ title: "공연 홈", url: `/app/p/${pid}`, icon: HouseIcon, exact: true }, { title: "일정", url: `/app/p/${pid}/schedule`, icon: CalendarDaysIcon, exact: false }, { title: "연습", url: `/app/p/${pid}/live`, icon: MicVocalIcon, exact: false }, { title: "소통", url: `/app/p/${pid}/board`, icon: MessageCircleIcon, exact: false }] : menu) as item (item.url)}
+      <nav aria-label="모바일 빠른 메뉴" class="bg-background/95 fixed inset-x-0 bottom-0 z-30 grid {pid ? 'grid-cols-5' : 'grid-cols-4'} border-t px-2 pb-[env(safe-area-inset-bottom)] backdrop-blur md:hidden">
+        {#each (pid ? [{ title: "공연 홈", url: `/app/p/${pid}`, icon: HouseIcon, exact: true }, { title: "일정", url: `/app/p/${pid}/schedule`, icon: CalendarDaysIcon, exact: false }, { title: "장·막", url: `/app/p/${pid}/composition`, icon: NotebookPenIcon, exact: false }, { title: "연습", url: `/app/p/${pid}/live`, icon: MicVocalIcon, exact: false }, { title: "소통", url: `/app/p/${pid}/board`, icon: MessageCircleIcon, exact: false }] : menu) as item (item.url)}
           {@const active = item.exact ? $page.url.pathname === item.url : $page.url.pathname.startsWith(item.url)}
           <a href={item.url} aria-current={active ? "page" : undefined} class="flex min-h-16 min-w-0 flex-col items-center justify-center gap-1 rounded-lg px-1 text-xs {active ? 'text-primary font-bold' : 'text-muted-foreground'}"><item.icon class="size-5" /><span>{item.title}{item.url === '/app/notifications' && unread > 0 ? ` (${unread > 99 ? '99+' : unread})` : ''}</span></a>
         {/each}

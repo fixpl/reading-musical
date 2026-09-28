@@ -14,16 +14,19 @@ coverage/
 .playwright-mcp
 # local tooling state
 .omx/
+.local-dev/
 
 # Runtime asset bodies are local/persistent data, not source code.
 .asset-objects/
 
 # Keep local documentation and legacy tests private. Root quality gates must
-# include their two runtime dependencies in a clean checkout.
+# include all of their runtime dependencies in a clean checkout.
 docs/
 tests/*
 !tests/run-quality.cjs
 !tests/smoke/
 tests/smoke/*
 !tests/smoke/performance-timeline-contract.cjs
+!tests/smoke/composition-ui-contract.cjs
+!tests/smoke/local-dev-contract.mjs
 PRD.md

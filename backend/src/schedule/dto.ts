@@ -1,8 +1,9 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from "@nestjs/swagger";
 import { AttendanceStatus, EventType } from "@prisma/client";
-import { Type } from "class-transformer";
+import { Transform, Type } from "class-transformer";
 import {
   ArrayMinSize,
+  ArrayUnique,
   IsArray,
   IsBoolean,
   IsDateString,
@@ -17,6 +18,7 @@ import {
 
 export class CreateScheduleEventDto {
   @ApiProperty()
+  @Transform(({ value }) => typeof value === "string" ? value.trim() : value)
   @IsString()
   @MinLength(1)
   title!: string;
@@ -57,18 +59,21 @@ export class CreateScheduleEventDto {
   @ApiPropertyOptional({ type: [String] })
   @IsOptional()
   @IsArray()
+  @ArrayUnique()
   @IsUUID(undefined, { each: true })
   sceneIds?: string[];
 
   @ApiPropertyOptional({ type: [String] })
   @IsOptional()
   @IsArray()
+  @ArrayUnique()
   @IsUUID(undefined, { each: true })
   musicCueIds?: string[];
 
   @ApiPropertyOptional({ type: [String] })
   @IsOptional()
   @IsArray()
+  @ArrayUnique()
   @IsUUID(undefined, { each: true })
   attendeeMembershipIds?: string[];
 
@@ -95,6 +100,7 @@ export class DeleteScheduleEventDto {
 export class PutEventScenesDto {
   @ApiProperty({ type: [String] })
   @IsArray()
+  @ArrayUnique()
   @IsUUID(undefined, { each: true })
   sceneIds!: string[];
 }
@@ -102,6 +108,7 @@ export class PutEventScenesDto {
 export class PutEventMusicCuesDto {
   @ApiProperty({ type: [String] })
   @IsArray()
+  @ArrayUnique()
   @IsUUID(undefined, { each: true })
   musicCueIds!: string[];
 }
@@ -127,6 +134,7 @@ export class UpsertAttendanceDto {
   @IsOptional()
   @IsArray()
   @ArrayMinSize(1)
+  @ArrayUnique()
   @IsUUID(undefined, { each: true })
   membershipIds?: string[];
 
@@ -138,6 +146,7 @@ export class UpsertAttendanceDto {
   @ApiPropertyOptional({ type: [AttendanceEntryDto] })
   @IsOptional()
   @IsArray()
+  @ArrayUnique((entry: AttendanceEntryDto) => entry?.membershipId)
   @ValidateNested({ each: true })
   @Type(() => AttendanceEntryDto)
   attendances?: AttendanceEntryDto[];

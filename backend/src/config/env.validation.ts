@@ -1,8 +1,8 @@
 type EnvConfig = Record<string, string | undefined>;
 
 const DEFAULT_API_PREFIX = "/api/v1";
-const DEFAULT_APP_PUBLIC_URL = "http://localhost:5173";
-const DEFAULT_CORS_ORIGINS = "http://localhost:5173";
+const DEFAULT_APP_PUBLIC_URL = "http://localhost:5179";
+const DEFAULT_CORS_ORIGINS = "http://localhost:5179,http://127.0.0.1:5179";
 const DEFAULT_MAIL_HOST = "localhost";
 const DEFAULT_MAIL_PORT = "1025";
 const DEFAULT_MAIL_FROM = "no-reply@reading-musical.local";

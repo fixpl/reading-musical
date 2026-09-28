@@ -22,6 +22,20 @@ function productionEnvironment(overrides: Record<string, string | undefined> = {
   };
 }
 
+describe("local environment defaults", () => {
+  it("uses the documented frontend port without weakening production validation", () => {
+    const config = validateEnvironment({
+      DATABASE_URL: "postgresql://local:local@127.0.0.1:5432/local_test",
+      JWT_ACCESS_SECRET: "local-test-access",
+      JWT_REFRESH_SECRET: "local-test-refresh"
+    });
+    expect(config.APP_PUBLIC_URL).toBe("http://localhost:5179");
+    expect(config.CORS_ORIGINS).toBe("http://localhost:5179,http://127.0.0.1:5179");
+    expect(() => validateEnvironment(productionEnvironment({ CORS_ORIGINS: "" }))).toThrow();
+    expect(() => validateEnvironment(productionEnvironment({ JWT_ACCESS_SECRET: "change-me" }))).toThrow();
+  });
+});
+
 describe("validateEnvironment Resend configuration", () => {
   it("accepts Resend as the production mail transport", () => {
     const config = validateEnvironment(productionEnvironment());
