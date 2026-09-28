@@ -5,8 +5,10 @@
   import { Button } from "$lib/components/ui/button";
   import { apiRequest, uploadSignedObject } from "$lib/api/client";
   import { buildPerformanceTimeline, formatTimelineTime as clock, parseTimelineTime, type TimelineAsset, type TimelineCue, type TimelineItem, type TimelineScene } from "$lib/domain/performance-timeline";
+  import { syncMedia } from "$lib/actions/sync-media";
+  import { assetName, mediaAt, SLOT_LABELS, type CompositionSection } from "$lib/domain/composition";
 
-  type Board = { production: { id: string; title: string; backgroundAsset?: TimelineAsset | null }; tracks: Array<{ id: string; name: string }>; scenes: TimelineScene[]; cues: TimelineCue[]; viewer: { canManageTracks: boolean; editableTrackIds: string[] } };
+  type Board = { production: { id: string; title: string; backgroundAsset?: TimelineAsset | null }; tracks: Array<{ id: string; name: string }>; scenes: TimelineScene[]; cues: TimelineCue[]; viewer: { canManageTracks: boolean; editableTrackIds: string[]; myCharacterIds: string[] } };
   type Signed = { url: string; expiresAt?: string };
   const pid = $derived($page.params.pid ?? "");
   let board = $state<Board | null>(null);
@@ -26,6 +28,7 @@
   let mediaError = $state("");
   const signing = new Map<string, Promise<void>>();
   let stage = $state<HTMLDivElement | undefined>(undefined);
+  let manualFullscreen = $state(false);
   let editing = $state<TimelineItem | null>(null);
   let startInput = $state("");
   let durationInput = $state("");
@@ -33,6 +36,8 @@
   let library = $state<TimelineAsset[]>([]);
   let saving = $state(false);
   let uploading = $state(false);
+  // 장·막 구성(장면별 악보·반주)을 연습 화면에 함께 보여준다 — 없어도 연습 진행에는 지장 없음.
+  let compositionSections = $state<CompositionSection[]>([]);
 
   const scripts = $derived([...new Map((board?.scenes ?? []).map((scene) => [scene.act.scriptId ?? "legacy", { id: scene.act.scriptId ?? "legacy", title: scene.act.script?.title ?? "대본" }])).values()]);
   const scenes = $derived((board?.scenes ?? []).filter((scene) => (scene.act.scriptId ?? "legacy") === selectedScript));
@@ -45,21 +50,38 @@
   const captions = $derived(activeLines.filter((item) => item.block?.type === "DIALOGUE" || item.block?.type === "LYRIC"));
   const nextLine = $derived(lines.find((item) => item.startMs > nowMs && (item.block?.type === "DIALOGUE" || item.block?.type === "LYRIC")));
   const activeCues = $derived(timeline.items.filter((item) => item.kind === "cue" && item.startMs <= nowMs && nowMs < item.startMs + item.durationMs));
-  const visualCue = $derived(activeCues.filter((item) => ["IMAGE", "VIDEO"].includes(item.cue?.asset?.kind ?? "")).at(-1));
-  const visual = $derived(visualCue?.cue?.asset ?? board?.production.backgroundAsset ?? null);
-  const visualTime = $derived(Math.max(0, nowMs - (visualCue?.startMs ?? 0)) / 1000);
   const audioCues = $derived(activeCues.filter((item) => item.cue?.asset?.kind === "AUDIO"));
   const filteredItems = $derived(timeline.items.filter((item) => !selectedScene || item.sceneId === selectedScene));
   const loopRange = $derived({ start: selectedScene && filteredItems.length ? Math.min(...filteredItems.map((item) => item.startMs)) : 0, end: selectedScene && filteredItems.length ? Math.max(...filteredItems.map((item) => item.startMs + item.durationMs)) : timeline.totalMs });
   const estimatedCount = $derived(timeline.items.filter((item) => item.estimated).length);
   const canEdit = (item: TimelineItem) => item.kind === "line" ? Boolean(board?.viewer.canManageTracks) : Boolean(board?.viewer.editableTrackIds.includes(item.cue?.trackId ?? ""));
 
+  // 지금 재생 중인 장면이 장·막 구성에서 가져온 구간이면, 그 구간에 연결된 배경·악보·반주를 함께 보여준다.
+  const activeSceneId = $derived(timeline.items.find((item) => item.startMs <= nowMs && nowMs < item.startMs + item.durationMs)?.sceneId ?? null);
+  const sceneItems = $derived(activeSceneId ? timeline.items.filter((item) => item.sceneId === activeSceneId) : []);
+  const sceneStartMs = $derived(sceneItems.length ? Math.min(...sceneItems.map((item) => item.startMs)) : 0);
+  const sceneSection = $derived(activeSceneId ? compositionSections.find((section) => section.sourceSceneId === activeSceneId) ?? null : null);
+  const backgroundClip = $derived(sceneSection ? mediaAt(compositionSections, sceneSection, "BACKGROUND", sceneSection.timing.startMs) : null);
+  const scoreClip = $derived(sceneSection ? mediaAt(compositionSections, sceneSection, "SCORE", sceneSection.timing.startMs) : null);
+  const musicClip = $derived(sceneSection ? mediaAt(compositionSections, sceneSection, "MUSIC", sceneSection.timing.startMs) : null);
+  const musicTime = $derived(musicClip ? musicClip.media.sourceStartMs / 1000 + Math.max(0, nowMs - sceneStartMs) / 1000 : 0);
+  const SCORE_IMAGE_MIME = ["image/png", "image/jpeg", "image/webp"];
+
+  // 배경은 장·막 구성이 우선, 없으면 기존 큐 배경·공연 기본 배경 순으로 대체한다.
+  const visualCue = $derived(activeCues.filter((item) => ["IMAGE", "VIDEO"].includes(item.cue?.asset?.kind ?? "")).at(-1));
+  const visual = $derived(backgroundClip?.media.asset ?? visualCue?.cue?.asset ?? board?.production.backgroundAsset ?? null);
+  const visualTime = $derived(
+    backgroundClip
+      ? backgroundClip.media.sourceStartMs / 1000 + Math.max(0, nowMs - sceneStartMs) / 1000
+      : Math.max(0, nowMs - (visualCue?.startMs ?? 0)) / 1000
+  );
+
   $effect(() => {
     const id = pid;
     const controller = new AbortController();
     board = null; loading = true; error = ""; playing = false; nowMs = 0; editing = null;
     selectedScript = ""; selectedScene = ""; selectedCharacter = "";
-    rowLimit = 100; repeat = false; signed = {}; library = []; mediaError = "";
+    rowLimit = 100; repeat = false; signed = {}; library = []; mediaError = ""; compositionSections = [];
     void load(id, controller.signal);
     return () => controller.abort();
   });
@@ -70,10 +92,19 @@
       if (signal?.aborted || id !== pid) return;
       board = result;
       selectedScript = result.scenes[0]?.act.scriptId ?? "legacy";
+      // 내가 캐스팅된 배역이 있으면 자동으로 강조 선택 — 매번 직접 고를 필요가 없도록.
+      selectedCharacter = result.viewer.myCharacterIds[0] ?? "";
     } catch (cause) {
       if (!signal?.aborted && id === pid) error = cause instanceof Error ? cause.message : "연습 자료를 불러오지 못했습니다";
     } finally {
       if (!signal?.aborted && id === pid) loading = false;
+    }
+    // 장·막 구성은 선택적 보강 자료라 실패해도 연습 화면 자체는 그대로 쓸 수 있어야 한다.
+    try {
+      const composition = await apiRequest<{ sections: CompositionSection[] }>(`/productions/${id}/composition`, { signal });
+      if (!signal?.aborted && id === pid) compositionSections = composition.sections;
+    } catch {
+      /* 장·막 구성 미사용 공연이거나 일시 오류 — 조용히 무시 */
     }
   }
 
@@ -107,8 +138,10 @@
   });
 
   $effect(() => {
-    const assets = [visual, ...audioCues.map((item) => item.cue?.asset)].filter((asset): asset is TimelineAsset => Boolean(asset));
-    for (const asset of assets) void ensureSigned(asset.id);
+    const assetIds = [visual?.id, ...audioCues.map((item) => item.cue?.asset?.id), scoreClip?.media.assetId, musicClip?.media.assetId].filter(
+      (id): id is string => Boolean(id)
+    );
+    for (const id of assetIds) void ensureSigned(id);
   });
 
   async function ensureSigned(assetId: string) {
@@ -125,30 +158,9 @@
     await promise;
   }
 
-  type MediaState = { time: number; play: boolean; rate: number; muted: boolean };
-  function syncMedia(node: HTMLMediaElement, state: MediaState) {
-    let current = state;
-    let playPending = false;
-    let disposed = false;
-    const apply = () => {
-      node.muted = current.muted;
-      node.playbackRate = current.rate;
-      if (node.readyState < 1) return;
-      const target = Number.isFinite(node.duration) ? Math.min(current.time, Math.max(0, node.duration - 0.01)) : current.time;
-      if (Math.abs(node.currentTime - target) > 0.25) node.currentTime = target;
-      if (!current.play || (Number.isFinite(node.duration) && current.time >= node.duration)) { node.pause(); return; }
-      if (node.paused && !playPending) {
-        playPending = true;
-        void node.play().catch(() => {
-          if (!disposed) { playing = false; mediaError = "브라우저가 미디어 재생을 허용하지 않았습니다. 소리를 끄거나 재생 버튼을 다시 눌러 주세요."; }
-        }).finally(() => { playPending = false; if (!current.play) node.pause(); });
-      }
-    };
-    const failed = () => { playing = false; mediaError = "파일을 재생할 수 없습니다. 브라우저 지원 형식과 업로드 상태를 확인해 주세요."; };
-    node.addEventListener("loadedmetadata", apply);
-    node.addEventListener("error", failed);
-    apply();
-    return { update(value: MediaState) { current = value; apply(); }, destroy() { disposed = true; node.pause(); node.removeEventListener("loadedmetadata", apply); node.removeEventListener("error", failed); } };
+  function onMediaError(message: string) {
+    playing = false;
+    mediaError = message;
   }
 
   function seek(value: number) {
@@ -168,11 +180,31 @@
     const target = direction === 1 ? candidates.find((item) => item.startMs > nowMs + 10) : [...candidates].reverse().find((item) => item.startMs < nowMs - 10);
     seek(target?.startMs ?? (direction === 1 ? timeline.totalMs : 0));
   }
+  // iOS Safari는 일반 요소에 표준 Fullscreen API를 지원하지 않는다.
+  // 지원 브라우저는 네이티브 전체화면을, 그렇지 않으면 고정 레이아웃 폴백을 쓴다.
   async function project() {
     if (!stage) return;
-    try { await stage.requestFullscreen(); }
-    catch { toast.error("이 브라우저에서는 전체화면을 열 수 없습니다. 아래 공연 화면을 사용해 주세요."); }
+    if (document.fullscreenEnabled && typeof stage.requestFullscreen === "function") {
+      try { await stage.requestFullscreen(); return; }
+      catch { /* 폴백으로 진행 */ }
+    }
+    manualFullscreen = true;
   }
+  function exitProjection() {
+    manualFullscreen = false;
+    if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+  }
+  $effect(() => {
+    if (!manualFullscreen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKeydown = (event: KeyboardEvent) => { if (event.key === "Escape") exitProjection(); };
+    window.addEventListener("keydown", onKeydown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeydown);
+    };
+  });
   async function openEditor(item: TimelineItem) {
     if (!canEdit(item)) return;
     playing = false;
@@ -261,18 +293,36 @@
     {:else}
       <div class="grid items-start gap-4 lg:grid-cols-[minmax(0,1.65fr)_minmax(260px,1fr)]">
         <section class="min-w-0 space-y-3">
-          <div bind:this={stage} class="stage-screen relative flex aspect-video w-full flex-col justify-end overflow-hidden rounded-2xl bg-black p-4 text-white sm:p-6">
+          <div
+            bind:this={stage}
+            class="stage-screen relative flex aspect-video w-full flex-col justify-end overflow-hidden rounded-2xl bg-black p-4 text-white sm:p-6"
+            class:manual-fullscreen={manualFullscreen}
+          >
+            {#if manualFullscreen}
+              <Button
+                variant="outline"
+                class="absolute end-4 top-4 z-20 min-h-11 border-white/30 bg-black/60 text-white hover:bg-black/80"
+                onclick={exitProjection}
+              >
+                닫기
+              </Button>
+            {/if}
             {#if visual && signed[visual.id]}
               {#key `${visual.id}:${signed[visual.id].url}`}
                 {#if visual.kind === "IMAGE"}<img src={signed[visual.id].url} alt="공연 배경" class="absolute inset-0 h-full w-full object-contain" />
-                {:else}<video src={signed[visual.id].url} playsinline preload="auto" class="absolute inset-0 h-full w-full object-contain" use:syncMedia={{ time: visualTime, play: playing, rate: speed, muted: !sound }}><track kind="captions" /></video>{/if}
+                {:else}<video src={signed[visual.id].url} playsinline preload="auto" class="absolute inset-0 h-full w-full object-contain" use:syncMedia={{ time: visualTime, play: playing, rate: speed, muted: !sound, onError: onMediaError }}><track kind="captions" /></video>{/if}
               {/key}
             {/if}
             <div class="relative z-10 max-h-full space-y-2 overflow-y-auto text-center">
               {#each captions as item (item.id)}<p class="rounded-xl bg-black/85 px-3 py-2 text-lg leading-relaxed sm:text-2xl" class:highlighted={Boolean(selectedCharacter && item.block?.character?.id === selectedCharacter)}><span class="mb-1 block text-xs font-bold sm:text-base">{item.block?.character?.name ?? "해설"}</span>{item.block?.text}</p>{/each}
             </div>
           </div>
-          {#each audioCues as item (item.id)}{#if item.cue?.asset && signed[item.cue.asset.id]}<audio src={signed[item.cue.asset.id].url} preload="auto" use:syncMedia={{ time: (nowMs - item.startMs) / 1000, play: playing, rate: speed, muted: !sound }}></audio>{/if}{/each}
+          {#each audioCues as item (item.id)}{#if item.cue?.asset && signed[item.cue.asset.id]}<audio src={signed[item.cue.asset.id].url} preload="auto" use:syncMedia={{ time: (nowMs - item.startMs) / 1000, play: playing, rate: speed, muted: !sound, onError: onMediaError }}></audio>{/if}{/each}
+          {#if musicClip && signed[musicClip.media.assetId]}
+            {#key musicClip.media.id}
+              <audio src={signed[musicClip.media.assetId].url} preload="auto" use:syncMedia={{ time: musicTime, play: playing, rate: speed, muted: !sound, onError: onMediaError }}></audio>
+            {/key}
+          {/if}
           <div class="bg-card space-y-3 rounded-2xl border p-4">
             <div class="flex items-center justify-between gap-3"><output class="font-mono text-sm tabular-nums">{clock(nowMs)} / {clock(timeline.totalMs)}</output><span class="text-muted-foreground text-xs">{playing ? "개인 연습 중" : "일시정지"}</span></div>
             <input class="accent-primary h-8 w-full" type="range" min="0" max={timeline.totalMs} step="100" value={nowMs} oninput={(event) => seek(Number(event.currentTarget.value))} aria-label="공연 시간 이동" />
@@ -285,6 +335,31 @@
         </section>
         <aside class="space-y-3">
           <section class="bg-card rounded-2xl border p-4"><h2 class="text-sm font-bold">다음 대사</h2>{#if nextLine}<p class="text-primary mt-2 text-xs">{clock(nextLine.startMs)} · {nextLine.block?.character?.name ?? "해설"}</p><p class="mt-2 whitespace-pre-wrap text-base leading-relaxed">{nextLine.block?.text}</p>{:else}<p class="text-muted-foreground mt-2 text-sm">다음 대사가 없습니다.</p>{/if}</section>
+          {#if sceneSection}
+            <section class="bg-card rounded-2xl border p-4">
+              <h2 class="text-sm font-bold">{SLOT_LABELS.SCORE}</h2>
+              {#if scoreClip && signed[scoreClip.media.assetId]}
+                {#key scoreClip.media.id}
+                  {#if SCORE_IMAGE_MIME.includes(scoreClip.media.asset.mime)}
+                    <img
+                      src={signed[scoreClip.media.assetId].url}
+                      alt="악보 {scoreClip.media.page}쪽"
+                      class="mt-2 max-h-[60vh] w-full rounded-lg border object-contain"
+                    />
+                  {:else}
+                    <iframe
+                      title="악보 PDF"
+                      src={`${signed[scoreClip.media.assetId].url}#page=${scoreClip.media.page}`}
+                      class="mt-2 h-[60vh] w-full rounded-lg border"
+                    ></iframe>
+                  {/if}
+                {/key}
+                <p class="text-muted-foreground mt-1 text-xs">{assetName(scoreClip.media.asset)} · {scoreClip.media.page}쪽</p>
+              {:else}
+                <p class="text-muted-foreground mt-2 text-sm">이 장면에 지정된 악보가 없습니다.</p>
+              {/if}
+            </section>
+          {/if}
           <section class="bg-card rounded-2xl border p-4"><h2 class="text-sm font-bold">현재 스태프 · 배우 행동 큐</h2>{#if activeCues.length === 0}<p class="text-muted-foreground mt-2 text-sm">현재 실행할 큐가 없습니다.</p>{/if}{#each activeCues as item (item.id)}<div class="mt-3 border-t pt-3"><p class="text-primary text-xs font-semibold">{board.tracks.find((track) => track.id === item.cue?.trackId)?.name} · {item.cue?.cueNumber}</p><p class="mt-1 whitespace-pre-wrap text-sm">{item.cue?.content}</p>{#if item.cue?.trigger}<p class="text-muted-foreground mt-1 text-xs">계기: {item.cue.trigger}</p>{/if}</div>{/each}</section>
           {#if activeLines.some((item) => item.block?.type === "STAGE_DIRECTION")}<section class="bg-card rounded-2xl border p-4"><h2 class="text-sm font-bold">현재 무대 지문</h2>{#each activeLines.filter((item) => item.block?.type === "STAGE_DIRECTION") as item (item.id)}<p class="mt-2 text-sm">{item.block?.text}</p>{/each}</section>{/if}
         </aside>
@@ -311,8 +386,9 @@
 </div>
 
 <style>
-  .stage-screen:fullscreen { width: 100vw; height: 100dvh; aspect-ratio: auto; border-radius: 0; padding: 5vh 5vw; }
-  .stage-screen:fullscreen p { font-size: clamp(24px, 3.4vw, 72px); }
-  .stage-screen:fullscreen p span { font-size: clamp(18px, 1.6vw, 36px); }
+  .stage-screen:fullscreen, .stage-screen.manual-fullscreen { width: 100vw; height: 100dvh; aspect-ratio: auto; border-radius: 0; padding: 5vh 5vw; }
+  .stage-screen:fullscreen p, .stage-screen.manual-fullscreen p { font-size: clamp(24px, 3.4vw, 72px); }
+  .stage-screen:fullscreen p span, .stage-screen.manual-fullscreen p span { font-size: clamp(18px, 1.6vw, 36px); }
+  .stage-screen.manual-fullscreen { position: fixed; inset: 0; z-index: 50; }
   .highlighted { outline: 2px solid currentColor; outline-offset: 2px; }
 </style>

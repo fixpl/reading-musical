@@ -803,13 +803,13 @@
       <h1 class="text-xl font-bold tracking-tight">큐시트</h1>
       <p class="text-muted-foreground text-sm">{title}</p>
     </div>
-    <div class="ms-auto flex items-center gap-1.5">
+    <div class="ms-auto flex flex-wrap items-center gap-1.5">
       {#if board && board.tracks.length > 0}
         <div class="bg-muted flex rounded-lg p-0.5">
           <Button
             variant={view === "list" ? "secondary" : "ghost"}
             size="sm"
-            class="h-7 px-3 text-xs"
+            class="h-7 px-3 text-xs whitespace-nowrap"
             onclick={() => (view = "list")}
           >
             표
@@ -817,7 +817,7 @@
           <Button
             variant={view === "timeline" ? "secondary" : "ghost"}
             size="sm"
-            class="h-7 px-3 text-xs"
+            class="h-7 px-3 text-xs whitespace-nowrap"
             onclick={() => (view = "timeline")}
           >
             타임라인
@@ -825,16 +825,16 @@
         </div>
       {/if}
       {#if canManage}
-        <Button variant="outline" size="sm" class="h-8" onclick={openAi}>
+        <Button variant="outline" size="sm" class="h-8 whitespace-nowrap" onclick={openAi}>
           <SparklesIcon />
           AI 초안
         </Button>
-        <Button variant="outline" size="sm" class="h-8" onclick={openTracks}>
+        <Button variant="outline" size="sm" class="h-8 whitespace-nowrap" onclick={openTracks}>
           <Settings2Icon />
           트랙
         </Button>
         <label
-          class="border-input hover:bg-accent inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border px-3 text-sm font-medium transition-colors {backgroundUploading
+          class="border-input hover:bg-accent inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-md border px-3 text-sm font-medium whitespace-nowrap transition-colors {backgroundUploading
             ? 'pointer-events-none opacity-50'
             : ''}"
           title="공연 뒷배경으로 재생할 영상을 올립니다 (mp4·webm·mov, 최대 500MB)"
@@ -850,13 +850,19 @@
           />
         </label>
         {#if board?.production.backgroundAsset}
-          <Button variant="ghost" size="sm" class="h-8" onclick={clearBackground} disabled={backgroundUploading}>
+          <Button
+            variant="ghost"
+            size="sm"
+            class="h-8 whitespace-nowrap"
+            onclick={clearBackground}
+            disabled={backgroundUploading}
+          >
             해제
           </Button>
         {/if}
       {/if}
       {#if canEditSomething && (board?.tracks.length ?? 0) > 0}
-        <Button size="sm" class="h-8" onclick={() => openCreateCue()}>
+        <Button size="sm" class="h-8 whitespace-nowrap" onclick={() => openCreateCue()}>
           <PlusIcon />
           큐 추가
         </Button>

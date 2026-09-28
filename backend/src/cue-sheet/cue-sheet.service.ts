@@ -43,7 +43,7 @@ export class CueSheetService {
   constructor(private readonly prisma: PrismaService) {}
 
   async getBoard(productionId: string, user: RequestUser) {
-    const [production, tracks, cues, scenes, editableTrackIds] = await Promise.all([
+    const [production, tracks, cues, scenes, editableTrackIds, myCharacterIds] = await Promise.all([
       this.prisma.production.findUnique({
         where: { id: productionId },
         select: {
@@ -93,7 +93,8 @@ export class CueSheetService {
           }
         }
       }),
-      this.resolveEditableTrackIds(productionId, user)
+      this.resolveEditableTrackIds(productionId, user),
+      this.resolveMyCharacterIds(productionId, user)
     ]);
 
     if (!production) {
@@ -107,9 +108,18 @@ export class CueSheetService {
       scenes,
       viewer: {
         canManageTracks: editableTrackIds === "ALL",
-        editableTrackIds: editableTrackIds === "ALL" ? tracks.map((track) => track.id) : editableTrackIds
+        editableTrackIds: editableTrackIds === "ALL" ? tracks.map((track) => track.id) : editableTrackIds,
+        myCharacterIds
       }
     };
+  }
+
+  // 로그인한 사용자가 캐스팅된 배역(들) — 연습 화면에서 "내 배역 강조"를 자동 선택하는 데 쓰인다.
+  private async resolveMyCharacterIds(productionId: string, user: RequestUser): Promise<string[]> {
+    const membership = await this.prisma.membership.findFirst({ where: { productionId, userId: user.id }, select: { id: true } });
+    if (!membership) return [];
+    const assignments = await this.prisma.castAssignment.findMany({ where: { membershipId: membership.id }, select: { roleId: true } });
+    return assignments.map((assignment) => assignment.roleId);
   }
 
   async createTrack(productionId: string, dto: CreateCueTrackDto, user: RequestUser) {
