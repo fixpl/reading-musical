@@ -6,7 +6,7 @@
   import { Button } from "$lib/components/ui/button";
   import { Textarea } from "$lib/components/ui/textarea";
   import { Skeleton } from "$lib/components/ui/skeleton";
-  import { apiRequest } from "$lib/api/client";
+  import { apiRequest, ApiError } from "$lib/api/client";
   import { fetchCurrentUser } from "$lib/api/auth";
   import { formatDateTime } from "$lib/domain/labels";
   import NotebookPenIcon from "@lucide/svelte/icons/notebook-pen";
@@ -26,6 +26,7 @@
 
   let memos = $state<Memo[]>([]);
   let loading = $state(true);
+  let forbidden = $state(false);
   let myId = $state<string | null>(null);
   let isAdmin = $state(false);
 
@@ -42,6 +43,7 @@
 
   async function load() {
     loading = true;
+    forbidden = false;
     try {
       const [me, list] = await Promise.all([
         fetchCurrentUser().catch(() => null),
@@ -51,7 +53,11 @@
       isAdmin = me?.platformRole === "SUPER_ADMIN" || me?.platformRole === "ORG_ADMIN";
       memos = list;
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "기획 메모를 불러오지 못했습니다");
+      if (error instanceof ApiError && error.status === 403) {
+        forbidden = true;
+      } else {
+        toast.error(error instanceof Error ? error.message : "기획 메모를 불러오지 못했습니다");
+      }
     } finally {
       loading = false;
     }
@@ -141,19 +147,21 @@
   </div>
 
   <!-- 새 메모 작성 -->
-  <div class="bg-card grid gap-3 rounded-2xl border p-4 sm:p-5">
-    <Textarea
-      bind:value={draft}
-      rows={4}
-      placeholder="예) 1막은 낭독 위주, 2막에 넘버 3곡 추가. 배우 6명 / 스텝 3명. 리허설 3회 협의."
-      class="resize-y"
-    />
-    <div class="flex justify-end">
-      <Button onclick={addMemo} disabled={saving || !draft.trim()}>
-        {saving ? "저장 중…" : "메모 추가"}
-      </Button>
+  {#if !loading && !forbidden}
+    <div class="bg-card grid gap-3 rounded-2xl border p-4 sm:p-5">
+      <Textarea
+        bind:value={draft}
+        rows={4}
+        placeholder="예) 1막은 낭독 위주, 2막에 넘버 3곡 추가. 배우 6명 / 스텝 3명. 리허설 3회 협의."
+        class="resize-y"
+      />
+      <div class="flex justify-end">
+        <Button onclick={addMemo} disabled={saving || !draft.trim()}>
+          {saving ? "저장 중…" : "메모 추가"}
+        </Button>
+      </div>
     </div>
-  </div>
+  {/if}
 
   <!-- 목록 -->
   {#if loading}
@@ -162,6 +170,11 @@
         <Skeleton class="h-28 w-full rounded-2xl" />
       {/each}
     </div>
+  {:else if forbidden}
+    <section class="bg-card rounded-2xl border p-8 text-center" role="alert">
+      <h2 class="font-semibold">이 화면을 관리할 권한이 없어요</h2>
+      <p class="text-muted-foreground mt-2 text-sm">기획 메모는 제작진만 볼 수 있습니다.</p>
+    </section>
   {:else if memos.length === 0}
     <div class="text-muted-foreground grid place-items-center gap-2 rounded-2xl border border-dashed py-14 text-center">
       <InboxIcon class="size-8 opacity-50" />

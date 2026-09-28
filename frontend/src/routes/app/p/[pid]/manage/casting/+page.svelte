@@ -8,7 +8,7 @@
   import { Input } from "$lib/components/ui/input";
   import { Label } from "$lib/components/ui/label";
   import { Skeleton } from "$lib/components/ui/skeleton";
-  import { apiRequest } from "$lib/api/client";
+  import { apiRequest, ApiError } from "$lib/api/client";
   import { CAST_ASSIGNMENT_KIND_LABELS } from "$lib/domain/labels";
   import PlusIcon from "@lucide/svelte/icons/plus";
   import SearchIcon from "@lucide/svelte/icons/search";
@@ -32,6 +32,7 @@
   let roles = $state<Role[]>([]);
   let members = $state<Membership[]>([]);
   let loading = $state(true);
+  let forbidden = $state(false);
   let saving = $state(false);
   let newRoleName = $state("");
   let selectedMembershipId = $state<string | null>(null);
@@ -224,11 +225,16 @@
   $effect(() => {
     void pid;
     loading = true;
+    forbidden = false;
     (async () => {
       try {
         await load();
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "캐스팅 정보를 불러오지 못했습니다");
+        if (error instanceof ApiError && error.status === 403) {
+          forbidden = true;
+        } else {
+          toast.error(error instanceof Error ? error.message : "캐스팅 정보를 불러오지 못했습니다");
+        }
       } finally {
         loading = false;
       }
@@ -246,7 +252,12 @@
     <p class="text-muted-foreground text-sm">배우를 고른 뒤 배역을 눌러 배정합니다. 한 배역에 여러 명도 됩니다. 배역은 대본의 화자로도 쓰입니다.</p>
   </div>
 
-  {#if !loading && looksDuplicated}
+  {#if forbidden}
+    <section class="bg-card mt-2 rounded-2xl border p-8 text-center" role="alert">
+      <h2 class="font-semibold">이 화면을 관리할 권한이 없어요</h2>
+      <p class="text-muted-foreground mt-2 text-sm">캐스팅은 제작진만 편집할 수 있습니다.</p>
+    </section>
+  {:else if !loading && looksDuplicated}
     <div class="border-border/60 bg-muted/40 text-muted-foreground mt-1 flex items-start gap-2 rounded-xl border px-4 py-2.5 text-sm">
       <GitMergeIcon class="text-foreground mt-0.5 size-4 shrink-0" />
       <span>같은 인물이 여러 배역으로 나뉘어 있을 수 있어요. 배역 카드의 <b class="text-foreground">합치기</b>로 하나로 모으면 배정·대본·큐가 함께 옮겨집니다.</span>
@@ -255,7 +266,7 @@
 
   {#if loading}
     <Skeleton class="mt-2 h-[460px] w-full rounded-2xl" />
-  {:else}
+  {:else if !forbidden}
     <div class="mt-2 grid gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
       <!-- 배우 풀 -->
       <div class="bg-card h-fit rounded-2xl p-4">

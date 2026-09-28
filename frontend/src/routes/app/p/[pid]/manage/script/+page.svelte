@@ -47,6 +47,8 @@
   let selectedSceneId = $state("");
   let loading = $state(true);
   let saving = $state(false);
+  // 대본 편집은 제작진(canManageTracks)만 — 큐시트가 이미 쓰는 것과 같은 신호를 재사용한다.
+  let canManage = $state(false);
 
   const selectedScene = $derived.by(() => {
     if (!script) return null;
@@ -89,10 +91,12 @@
   async function load(keepScene = false) {
     loading = true;
     try {
-      const [scriptList, roleList] = await Promise.all([
+      const [scriptList, roleList, board] = await Promise.all([
         apiRequest<ScriptSummary[]>(`/productions/${pid}/scripts`),
-        apiRequest<CastRole[]>(`/productions/${pid}/roles`)
+        apiRequest<CastRole[]>(`/productions/${pid}/roles`),
+        apiRequest<{ viewer: { canManageTracks: boolean } }>(`/productions/${pid}/cue-sheet`).catch(() => ({ viewer: { canManageTracks: false } }))
       ]);
+      canManage = board.viewer.canManageTracks;
       scripts = scriptList;
       castRoles = roleList;
       const currentId = script?.id;
@@ -454,6 +458,7 @@
       <h1 class="text-xl font-bold tracking-tight">대본 편집</h1>
       <p class="text-muted-foreground text-sm">장면을 고르고 대사·가사·지문을 한 줄씩 씁니다.</p>
     </div>
+    {#if canManage}
     <div class="ms-auto flex items-center gap-1.5">
       {#if scripts.length > 1}
         <div class="bg-muted flex flex-wrap rounded-lg p-0.5">
@@ -499,6 +504,7 @@
         삭제된 대본
       </Button>
     </div>
+    {/if}
   </div>
 
   {#if showTrash}
@@ -533,6 +539,11 @@
 
   {#if loading}
     <Skeleton class="mt-2 h-96 w-full rounded-2xl" />
+  {:else if !canManage}
+    <section class="bg-card mt-2 rounded-2xl border p-8 text-center" role="alert">
+      <h2 class="font-semibold">이 화면을 관리할 권한이 없어요</h2>
+      <p class="text-muted-foreground mt-2 text-sm">대본 편집은 제작진만 할 수 있습니다. 대본 열람은 "대본" 메뉴를 이용하세요.</p>
+    </section>
   {:else if !script}
     <div class="bg-card mt-2 rounded-2xl px-6 py-14 text-center">
       <p class="font-semibold">아직 대본이 없습니다</p>

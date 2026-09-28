@@ -8,7 +8,7 @@
   import { Input } from "$lib/components/ui/input";
   import { Label } from "$lib/components/ui/label";
   import { Skeleton } from "$lib/components/ui/skeleton";
-  import { apiRequest } from "$lib/api/client";
+  import { apiRequest, ApiError } from "$lib/api/client";
   import {
     PRODUCTION_ROLE_LABELS,
     PROFILE_TYPE_LABELS,
@@ -51,6 +51,7 @@
   let members = $state<Membership[]>([]);
   let castingRoles = $state<CastingRole[]>([]);
   let loading = $state(true);
+  let forbidden = $state(false);
   let saving = $state(false);
 
   // 추가 패널
@@ -218,12 +219,17 @@
   $effect(() => {
     void pid;
     loading = true;
+    forbidden = false;
     (async () => {
       try {
         await loadMembers();
         await loadPool();
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "멤버를 불러오지 못했습니다");
+        if (error instanceof ApiError && error.status === 403) {
+          forbidden = true;
+        } else {
+          toast.error(error instanceof Error ? error.message : "멤버를 불러오지 못했습니다");
+        }
       } finally {
         loading = false;
       }
@@ -243,6 +249,11 @@
 
   {#if loading}
     <Skeleton class="mt-2 h-[460px] w-full rounded-2xl" />
+  {:else if forbidden}
+    <section class="bg-card mt-2 rounded-2xl border p-8 text-center" role="alert">
+      <h2 class="font-semibold">이 화면을 관리할 권한이 없어요</h2>
+      <p class="text-muted-foreground mt-2 text-sm">멤버 관리는 제작진만 할 수 있습니다.</p>
+    </section>
   {:else}
     <div class="mt-2 grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
       <!-- 현재 멤버 -->

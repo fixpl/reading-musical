@@ -110,9 +110,9 @@ export class AdminService {
         this.prisma.user.count(),
         this.prisma.user.count({ where: { status: UserStatus.BLOCKED } }),
         this.prisma.user.count({ where: { profileComplete: false } }),
-        this.prisma.production.count(),
-        this.prisma.production.count({ where: { visibility: "PUBLISHED" } }),
-        this.prisma.scheduleEvent.count({ where: { startAt: this.currentMonthFilter() } }),
+        this.prisma.production.count({ where: { deletedAt: null } }),
+        this.prisma.production.count({ where: { deletedAt: null, visibility: "PUBLISHED" } }),
+        this.prisma.scheduleEvent.count({ where: { startAt: this.currentMonthFilter(), production: { deletedAt: null } } }),
         this.prisma.asset.aggregate({ _sum: { sizeBytes: true }, _count: true }),
         this.prisma.checklistTemplate.count({ where: { active: true } }),
         this.prisma.systemSetting.count(),
@@ -166,6 +166,7 @@ export class AdminService {
   async getProductionPhaseDistribution() {
     const rows = await this.prisma.production.groupBy({
       by: ["currentPhase"],
+      where: { deletedAt: null },
       _count: { _all: true },
       orderBy: { currentPhase: "asc" }
     });
@@ -179,6 +180,7 @@ export class AdminService {
   async getProductionVisibilityDistribution() {
     const rows = await this.prisma.production.groupBy({
       by: ["visibility"],
+      where: { deletedAt: null },
       _count: { _all: true },
       orderBy: { visibility: "asc" }
     });
@@ -191,7 +193,7 @@ export class AdminService {
 
   async listCurrentMonthEvents() {
     return this.prisma.scheduleEvent.findMany({
-      where: { startAt: this.currentMonthFilter() },
+      where: { startAt: this.currentMonthFilter(), production: { deletedAt: null } },
       orderBy: { startAt: "asc" },
       take: 80,
       select: {

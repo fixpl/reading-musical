@@ -28,6 +28,8 @@
   let production = $state<Production | null>(null);
   let loading = $state(true);
   let saving = $state(false);
+  // 공연 설정은 제작진(canManageTracks)만 편집 — 큐시트가 이미 쓰는 것과 같은 신호를 재사용한다.
+  let canManage = $state(false);
 
   let title = $state("");
   let venue = $state("");
@@ -41,7 +43,12 @@
   async function load() {
     loading = true;
     try {
-      production = await apiRequest<Production>(`/productions/${pid}`);
+      const [prod, board] = await Promise.all([
+        apiRequest<Production>(`/productions/${pid}`),
+        apiRequest<{ viewer: { canManageTracks: boolean } }>(`/productions/${pid}/cue-sheet`).catch(() => ({ viewer: { canManageTracks: false } }))
+      ]);
+      canManage = board.viewer.canManageTracks;
+      production = prod;
       title = production.title;
       venue = production.venue ?? "";
       synopsis = production.synopsis ?? "";
@@ -108,6 +115,11 @@
 
   {#if loading}
     <Skeleton class="mt-2 h-96 w-full rounded-2xl" />
+  {:else if !canManage}
+    <section class="bg-card mt-2 rounded-2xl border p-8 text-center" role="alert">
+      <h2 class="font-semibold">이 화면을 관리할 권한이 없어요</h2>
+      <p class="text-muted-foreground mt-2 text-sm">공연 설정은 제작진만 편집할 수 있습니다.</p>
+    </section>
   {:else if production}
     <Card.Root class="mt-2">
       <Card.Content>
