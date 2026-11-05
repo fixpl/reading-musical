@@ -28,6 +28,7 @@ import {
 } from "./dto";
 import { isPlatformAdmin } from "../common/access/is-production-admin";
 import { assertProductionMembership } from "../common/access/assert-production-membership";
+import { RunSheetAuditService } from "./run-sheet-audit.service";
 
 const VIEW_ROLES: ProductionRole[] = [
   ProductionRole.PRODUCER,
@@ -64,7 +65,7 @@ type GeneratedRunSheetItem = {
 };
 
 type MembershipForPolicy = Prisma.MembershipGetPayload<{ include: { roles: true; staffAssignments: true } }>;
-type RunSheetItemForPolicy = {
+export type RunSheetItemForPolicy = {
   id: string;
   order: number;
   itemType: RunSheetItemType;
@@ -83,7 +84,7 @@ type RunSheetItemForPolicy = {
   cue?: { anchorStatus: AnchorStatus } | null;
 };
 
-type RunSheetAuditSnapshotInput = {
+export type RunSheetAuditSnapshotInput = {
   id: string;
   productionId: string;
   eventId: string;
@@ -103,7 +104,8 @@ type RunSheetAuditSnapshotInput = {
 export class RunSheetsService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly assetsService: AssetsService
+    private readonly assetsService: AssetsService,
+    private readonly audit: RunSheetAuditService
   ) {}
 
   async getWorkspace(productionId: string, user: RequestUser) {
@@ -181,12 +183,12 @@ export class RunSheetsService {
       },
       include: this.runSheetInclude()
     });
-    await this.writeActivityLog(productionId, user, {
+    await this.audit.writeActivityLog(productionId, user, {
       action: "run_sheet.created",
       entity: "RunSheet",
       entityId: created.id,
       reason: "진행표 초안 생성",
-      afterJson: this.runSheetAuditSnapshot(created)
+      afterJson: this.audit.runSheetAuditSnapshot(created)
     });
     return created;
   }
@@ -207,12 +209,12 @@ export class RunSheetsService {
       },
       include: this.runSheetInclude()
     });
-    await this.writeActivityLog(productionId, user, {
+    await this.audit.writeActivityLog(productionId, user, {
       action: "run_sheet.generated",
       entity: "RunSheet",
       entityId: created.id,
       reason: "일정 기준 진행표 자동 생성",
-      afterJson: this.runSheetAuditSnapshot(created)
+      afterJson: this.audit.runSheetAuditSnapshot(created)
     });
     return created;
   }
@@ -225,7 +227,7 @@ export class RunSheetsService {
       throw new BadRequestException("진행표의 일정과 generate eventId가 달라요");
     }
     const items = await this.buildGeneratedItems(productionId, runSheet.eventId, dto);
-    const beforeJson = this.runSheetAuditSnapshot(runSheet);
+    const beforeJson = this.audit.runSheetAuditSnapshot(runSheet);
     const updated = await this.prisma.$transaction(async (tx) => {
       await tx.runSheetItem.deleteMany({ where: { runSheetId } });
       await tx.runSheetItem.createMany({
@@ -233,13 +235,13 @@ export class RunSheetsService {
       });
       return tx.runSheet.update({ where: { id: runSheetId }, data: {}, include: this.runSheetInclude() });
     });
-    await this.writeActivityLog(productionId, user, {
+    await this.audit.writeActivityLog(productionId, user, {
       action: "run_sheet.regenerated",
       entity: "RunSheet",
       entityId: runSheetId,
       reason: "진행표 항목 재생성",
       beforeJson,
-      afterJson: this.runSheetAuditSnapshot(updated)
+      afterJson: this.audit.runSheetAuditSnapshot(updated)
     });
     return updated;
   }
@@ -259,7 +261,7 @@ export class RunSheetsService {
         warnings
       });
     }
-    const beforeJson = this.runSheetAuditSnapshot(runSheet);
+    const beforeJson = this.audit.runSheetAuditSnapshot(runSheet);
     const updated = await this.prisma.runSheet.update({
       where: { id: runSheetId },
       data: {
@@ -269,13 +271,13 @@ export class RunSheetsService {
       },
       include: this.runSheetInclude()
     });
-    await this.writeActivityLog(productionId, user, {
+    await this.audit.writeActivityLog(productionId, user, {
       action: "run_sheet.locked",
       entity: "RunSheet",
       entityId: runSheetId,
       reason,
       beforeJson,
-      afterJson: this.runSheetAuditSnapshot(updated)
+      afterJson: this.audit.runSheetAuditSnapshot(updated)
     });
     return updated;
   }
@@ -314,13 +316,13 @@ export class RunSheetsService {
       },
       include: this.runSheetInclude()
     });
-    await this.writeActivityLog(productionId, user, {
+    await this.audit.writeActivityLog(productionId, user, {
       action: "run_sheet.revised",
       entity: "RunSheet",
       entityId: created.id,
       reason,
-      beforeJson: this.runSheetAuditSnapshot(runSheet),
-      afterJson: this.runSheetAuditSnapshot(created)
+      beforeJson: this.audit.runSheetAuditSnapshot(runSheet),
+      afterJson: this.audit.runSheetAuditSnapshot(created)
     });
     return created;
   }
@@ -339,19 +341,19 @@ export class RunSheetsService {
         incomplete: incomplete.map((item) => ({ id: item.id, title: item.title, order: item.order }))
       });
     }
-    const beforeJson = this.runSheetAuditSnapshot(runSheet);
+    const beforeJson = this.audit.runSheetAuditSnapshot(runSheet);
     const updated = await this.prisma.runSheet.update({
       where: { id: runSheetId },
       data: { status: RunSheetStatus.COMPLETED, completedAt: new Date() },
       include: this.runSheetInclude()
     });
-    await this.writeActivityLog(productionId, user, {
+    await this.audit.writeActivityLog(productionId, user, {
       action: "run_sheet.completed",
       entity: "RunSheet",
       entityId: runSheetId,
       reason,
       beforeJson,
-      afterJson: this.runSheetAuditSnapshot(updated)
+      afterJson: this.audit.runSheetAuditSnapshot(updated)
     });
     return updated;
   }
@@ -372,12 +374,12 @@ export class RunSheetsService {
         include: this.itemInclude()
       });
     });
-    await this.writeActivityLog(productionId, user, {
+    await this.audit.writeActivityLog(productionId, user, {
       action: "run_sheet.item_created",
       entity: "RunSheetItem",
       entityId: created.id,
       reason: "진행표 항목 생성",
-      afterJson: this.runSheetItemAuditSnapshot(created)
+      afterJson: this.audit.runSheetItemAuditSnapshot(created)
     });
     return created;
   }
@@ -409,13 +411,13 @@ export class RunSheetsService {
       },
       include: this.itemInclude()
     });
-    await this.writeActivityLog(productionId, user, {
+    await this.audit.writeActivityLog(productionId, user, {
       action: "run_sheet.item_updated",
       entity: "RunSheetItem",
       entityId: itemId,
       reason: "진행표 항목 수정",
-      beforeJson: this.runSheetItemAuditSnapshot(item),
-      afterJson: this.runSheetItemAuditSnapshot(updated)
+      beforeJson: this.audit.runSheetItemAuditSnapshot(item),
+      afterJson: this.audit.runSheetItemAuditSnapshot(updated)
     });
     return updated;
   }
@@ -426,7 +428,7 @@ export class RunSheetsService {
     const runSheet = await this.assertRunSheet(productionId, runSheetId);
     this.assertDraft(runSheet.status);
     const item = this.assertItemInRunSheet(runSheet, itemId);
-    const auditScope = await this.getProductionAuditScope(productionId);
+    const auditScope = await this.audit.getProductionAuditScope(productionId);
     await this.prisma.$transaction([
       this.prisma.activityLog.create({
         data: {
@@ -436,8 +438,8 @@ export class RunSheetsService {
           entity: "RunSheetItem",
           entityId: itemId,
           reason,
-          beforeJson: this.toJson(this.runSheetItemAuditSnapshot(item)),
-          afterJson: this.toJson({ deletedId: itemId, deletedAt: new Date().toISOString() })
+          beforeJson: this.audit.toJson(this.audit.runSheetItemAuditSnapshot(item)),
+          afterJson: this.audit.toJson({ deletedId: itemId, deletedAt: new Date().toISOString() })
         }
       }),
       this.prisma.runSheetItem.delete({ where: { id: itemId } })
@@ -455,18 +457,18 @@ export class RunSheetsService {
     if (currentIds.length !== incomingIds.length || currentIds.some((id, index) => id !== incomingIds[index])) {
       throw new BadRequestException("현재 진행표 항목 전체 순서를 보내야 해요");
     }
-    const beforeJson = this.runSheetAuditSnapshot(runSheet);
+    const beforeJson = this.audit.runSheetAuditSnapshot(runSheet);
     await this.prisma.$transaction(
       dto.itemIds.map((id, index) => this.prisma.runSheetItem.update({ where: { id }, data: { order: index + 1 } }))
     );
     const updated = await this.assertRunSheet(productionId, runSheetId);
-    await this.writeActivityLog(productionId, user, {
+    await this.audit.writeActivityLog(productionId, user, {
       action: "run_sheet.items_reordered",
       entity: "RunSheet",
       entityId: runSheetId,
       reason: "진행표 항목 순서 변경",
       beforeJson,
-      afterJson: this.runSheetAuditSnapshot(updated)
+      afterJson: this.audit.runSheetAuditSnapshot(updated)
     });
     return updated;
   }
@@ -491,13 +493,13 @@ export class RunSheetsService {
       },
       include: this.itemInclude()
     });
-    await this.writeActivityLog(productionId, user, {
+    await this.audit.writeActivityLog(productionId, user, {
       action: done ? "run_sheet.item_completed" : "run_sheet.item_completion_cleared",
       entity: "RunSheetItem",
       entityId: itemId,
       reason: dto.note?.trim() || (done ? "진행표 항목 완료" : "진행표 항목 완료 해제"),
-      beforeJson: this.runSheetItemAuditSnapshot(item),
-      afterJson: this.runSheetItemAuditSnapshot(updated)
+      beforeJson: this.audit.runSheetItemAuditSnapshot(item),
+      afterJson: this.audit.runSheetItemAuditSnapshot(updated)
     });
     return updated;
   }
@@ -841,88 +843,6 @@ export class RunSheetsService {
       throw new BadRequestException(message);
     }
     return normalized;
-  }
-
-  private async writeActivityLog(
-    productionId: string,
-    user: RequestUser,
-    input: {
-      action: string;
-      entity: "RunSheet" | "RunSheetItem";
-      entityId: string;
-      reason?: string | null;
-      beforeJson?: unknown;
-      afterJson?: unknown;
-    }
-  ) {
-    const auditScope = await this.getProductionAuditScope(productionId);
-    await this.prisma.activityLog.create({
-      data: {
-        ...auditScope,
-        actorId: user.id,
-        action: input.action,
-        entity: input.entity,
-        entityId: input.entityId,
-        reason: input.reason?.trim() || null,
-        beforeJson: input.beforeJson === undefined ? undefined : this.toJson(input.beforeJson),
-        afterJson: input.afterJson === undefined ? undefined : this.toJson(input.afterJson)
-      }
-    });
-  }
-
-  private async getProductionAuditScope(productionId: string) {
-    const production = await this.prisma.production.findUnique({
-      where: { id: productionId },
-      select: { id: true, organizationId: true }
-    });
-    if (!production) {
-      throw new NotFoundException("공연을 찾을 수 없어요");
-    }
-    return { productionId: production.id, organizationId: production.organizationId };
-  }
-
-  private runSheetAuditSnapshot(runSheet: RunSheetAuditSnapshotInput) {
-    return {
-      id: runSheet.id,
-      productionId: runSheet.productionId,
-      eventId: runSheet.eventId,
-      eventTitle: runSheet.event?.title ?? null,
-      title: runSheet.title,
-      version: runSheet.version,
-      status: runSheet.status,
-      createdById: runSheet.createdById,
-      lockedAt: runSheet.lockedAt?.toISOString() ?? null,
-      completedAt: runSheet.completedAt?.toISOString() ?? null,
-      createdAt: runSheet.createdAt?.toISOString() ?? null,
-      updatedAt: runSheet.updatedAt?.toISOString() ?? null,
-      itemCount: runSheet.items.length,
-      items: runSheet.items.map((item) => this.runSheetItemAuditSnapshot(item))
-    };
-  }
-
-  private runSheetItemAuditSnapshot(item: RunSheetItemForPolicy) {
-    return {
-      id: item.id,
-      order: item.order,
-      itemType: item.itemType,
-      title: item.title,
-      sceneId: item.sceneId ?? null,
-      cueId: item.cueId ?? null,
-      stageSceneNoteId: item.stageSceneNoteId ?? null,
-      checklistItemId: item.checklistItemId ?? null,
-      estimatedDurationMin: item.estimatedDurationMin ?? null,
-      ownerRole: item.ownerRole ?? null,
-      ownerMembershipId: item.ownerMembershipId ?? null,
-      staffDiscipline: item.staffDiscipline ?? null,
-      note: item.note ?? null,
-      completedAt: item.completedAt?.toISOString() ?? null,
-      completedById: item.completedById ?? null,
-      cueAnchorStatus: item.cue?.anchorStatus ?? null
-    };
-  }
-
-  private toJson(value: unknown): Prisma.InputJsonValue {
-    return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
   }
 
   private getProductionScenes(productionId: string) {

@@ -3,12 +3,13 @@ import { JwtModule } from "@nestjs/jwt";
 import { AssetsModule } from "../assets/assets.module";
 import { RolesGuard } from "../common/guards/roles.guard";
 import { PrismaModule } from "../prisma/prisma.module";
+import { RunSheetAuditService } from "./run-sheet-audit.service";
 import { RunSheetsController } from "./run-sheets.controller";
 import { RunSheetsService } from "./run-sheets.service";
 
 @Module({
   imports: [PrismaModule, AssetsModule, JwtModule.register({})],
   controllers: [RunSheetsController],
-  providers: [RunSheetsService, RolesGuard]
+  providers: [RunSheetsService, RunSheetAuditService, RolesGuard]
 })
 export class RunSheetsModule {}
