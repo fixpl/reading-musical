@@ -2,6 +2,7 @@ import { BadRequestException, ForbiddenException } from "@nestjs/common";
 import { plainToInstance } from "class-transformer";
 import { validate } from "class-validator";
 import { CreateScheduleEventDto, UpsertAttendanceDto } from "./dto";
+import { ScheduleNotificationsService } from "./schedule-notifications.service";
 import { ScheduleService } from "./schedule.service";
 
 // Offline tests: mock database queries, but execute the real schedule service.
@@ -15,11 +16,12 @@ function fixture() {
     notification: { findFirst: jest.fn().mockResolvedValue(null) },
     emailDelivery: { findFirst: jest.fn().mockResolvedValue(null) }
   };
-  const service = new ScheduleService(prisma as never, {} as never, {} as never);
+  const notificationsService = new ScheduleNotificationsService(prisma as never, {} as never, {} as never);
+  const service = new ScheduleService(prisma as never, notificationsService);
   // Private methods are exercised deliberately to inspect the exact Prisma boundary.
   const internal = service as any;
   const range = { startAt: new Date("2026-09-08T10:00:00+09:00"), endAt: new Date("2026-09-08T11:00:00+09:00") };
-  return { prisma, service, internal, range };
+  return { prisma, service, internal, notificationsService, range };
 }
 
 describe("schedule conflict and permission regressions", () => {
@@ -84,7 +86,8 @@ describe("schedule conflict and permission regressions", () => {
   });
 
   it("deduplicates reminders by attendance and current start time", async () => {
-    const { prisma, internal, range } = fixture();
+    const { prisma, notificationsService, range } = fixture();
+    const internal = notificationsService as any;
     const attendance = { id: "a", event: { productionId: "p", ...range }, membership: { user: { id: "u" } } };
     await internal.hasAttendanceReminder(attendance);
     const key = `attendance:a:${range.startAt.toISOString()}`;
