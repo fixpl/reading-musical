@@ -2,6 +2,7 @@ import { ForbiddenException } from "@nestjs/common";
 import type { Prisma, ProductionRole } from "@prisma/client";
 import type { PrismaService } from "../../prisma/prisma.service";
 import type { RequestUser } from "../types/request-user";
+import { ERR_FORBIDDEN_DEFAULT } from "../constants/error-messages";
 import { isProductionAdmin } from "./is-production-admin";
 
 /**
@@ -53,7 +54,7 @@ export async function assertProductionMembership(
     ...(options.select ? { select: options.select } : {})
   });
   if (!membership) {
-    throw new ForbiddenException(options.forbiddenMessage ?? "이 작업을 할 권한이 없어요");
+    throw new ForbiddenException(options.forbiddenMessage ?? ERR_FORBIDDEN_DEFAULT);
   }
   return membership;
 }
