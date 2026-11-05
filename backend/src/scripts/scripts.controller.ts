@@ -20,6 +20,7 @@ import {
   UpdateAnnotationDto,
   UpdateBlockDto
 } from "./dto";
+import { ScriptImportService } from "./script-import.service";
 import { ScriptsService } from "./scripts.service";
 
 const ALL_PRODUCTION_ROLES = ["PRODUCER", "DIRECTOR", "MUSIC_DIRECTOR", "STAGE_MANAGER", "ACTOR", "STAFF", "GUEST"] as const;
@@ -32,7 +33,10 @@ const SCRIPT_EDIT_ROLES = ["PRODUCER", "DIRECTOR"] as const;
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Controller("productions/:pid")
 export class ScriptsController {
-  constructor(private readonly scriptsService: ScriptsService) {}
+  constructor(
+    private readonly scriptsService: ScriptsService,
+    private readonly scriptImport: ScriptImportService
+  ) {}
 
   @Get("scripts")
   listScripts(@Param("pid") productionId: string, @CurrentUser() user: RequestUser) {
@@ -173,7 +177,7 @@ export class ScriptsController {
     @Body() dto: CreateScriptImportDto,
     @CurrentUser() user: RequestUser
   ) {
-    return this.scriptsService.createImport(productionId, scriptId, dto, user);
+    return this.scriptImport.createImport(productionId, scriptId, dto, user);
   }
 
   @Post("scripts/:scriptId/imports/:importId/apply")
@@ -185,7 +189,7 @@ export class ScriptsController {
     @Body() dto: ApplyScriptImportDto,
     @CurrentUser() user: RequestUser
   ) {
-    return this.scriptsService.applyImport(productionId, scriptId, importId, dto, user);
+    return this.scriptImport.applyImport(productionId, scriptId, importId, dto, user);
   }
 
   @Get("blocks/:blockId/annotations")
