@@ -2,7 +2,7 @@ import "reflect-metadata";
 import { Logger } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { AppModule } from "../app.module";
-import { ScheduleService } from "./schedule.service";
+import { ScheduleNotificationsService } from "./schedule-notifications.service";
 
 const logger = new Logger("AttendanceReminderWorker");
 
@@ -10,11 +10,11 @@ async function bootstrap() {
   const app = await NestFactory.createApplicationContext(AppModule, {
     logger: ["error", "warn", "log"]
   });
-  const schedule = app.get(ScheduleService);
+  const scheduleNotifications = app.get(ScheduleNotificationsService);
   const lookaheadHours = numberEnv("ATTENDANCE_REMINDER_LOOKAHEAD_HOURS", 24);
 
   try {
-    const result = await schedule.sendAttendanceReminders({ lookaheadHours });
+    const result = await scheduleNotifications.sendAttendanceReminders({ lookaheadHours });
     logger.log(JSON.stringify({ event: "attendance_reminder_drain", ...result }));
   } finally {
     await app.close();

@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   ServiceUnavailableException
 } from "@nestjs/common";
 import OpenAI from "openai";
@@ -82,6 +83,8 @@ const BLOCK_TYPE_BY_KIND: Record<string, SceneBlockType> = {
 
 @Injectable()
 export class AiService {
+  private readonly logger = new Logger(AiService.name);
+
   constructor(private readonly prisma: PrismaService) {}
 
   async generateCueDraft(
@@ -467,7 +470,7 @@ export class AiService {
   private toServiceError(error: unknown) {
     if (error instanceof OpenAI.APIError) {
       // Do not log provider messages: they may contain script text or credentials.
-      console.error("[ai] provider error status", error.status);
+      this.logger.error(`provider error status ${error.status}`);
       return new ServiceUnavailableException(
         `AI 호출에 실패했습니다 (${error.status ?? "네트워크 오류"}). 잠시 후 다시 시도해 주세요.`
       );

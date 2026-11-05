@@ -19,7 +19,8 @@ import {
   UpdateChecklistStatusDto
 } from "./dto";
 import { activeChecklistTemplateSeeds, CHECKLIST_PHASE_ORDER } from "./checklist-template-seed";
-import { isPlatformAdmin, isProductionAdmin } from "../common/access/is-production-admin";
+import { isPlatformAdmin } from "../common/access/is-production-admin";
+import { assertProductionMembership } from "../common/access/assert-production-membership";
 
 const PHASE_ORDER = [...CHECKLIST_PHASE_ORDER];
 const VIEW_ROLES: ProductionRole[] = [
@@ -370,17 +371,9 @@ export class ChecklistService {
   }
 
   private async assertMembership(productionId: string, user: RequestUser, roles: ProductionRole[]) {
-    if (await isProductionAdmin(this.prisma, user, productionId)) {
-      return null;
-    }
-    const membership = await this.prisma.membership.findFirst({
-      where: { productionId, userId: user.id, roles: { some: { role: { in: roles } } } },
+    return assertProductionMembership(this.prisma, user, productionId, roles, {
       include: { roles: true, staffAssignments: true }
     });
-    if (!membership) {
-      throw new ForbiddenException("이 작업을 할 권한이 없어요");
-    }
-    return membership;
   }
 
   private async assertPhase(productionId: string, phase: Phase) {

@@ -1,9 +1,9 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from "@nestjs/common";
 import { CastAssignmentKind, Prisma, ProductionRole, SceneBlockType } from "@prisma/client";
 import type { RequestUser } from "../common/types/request-user";
 import { PrismaService } from "../prisma/prisma.service";
 import { CreateRoleDto, PutSceneRolesDto, UpdateRoleDto, UpsertCastAssignmentDto, MergeRoleDto } from "./dto";
-import { isProductionAdmin } from "../common/access/is-production-admin";
+import { assertProductionMembership } from "../common/access/assert-production-membership";
 
 const VIEW_ROLES: ProductionRole[] = [
   ProductionRole.PRODUCER,
@@ -366,16 +366,7 @@ export class CastingService {
   }
 
   private async assertMembership(productionId: string, user: RequestUser, roles: ProductionRole[]) {
-    if (await isProductionAdmin(this.prisma, user, productionId)) {
-      return;
-    }
-    const membership = await this.prisma.membership.findFirst({
-      where: { productionId, userId: user.id, roles: { some: { role: { in: roles } } } },
-      select: { id: true }
-    });
-    if (!membership) {
-      throw new ForbiddenException("이 작업을 할 권한이 없어요");
-    }
+    await assertProductionMembership(this.prisma, user, productionId, roles);
   }
 
   private async assertUniqueRoleName(productionId: string, name: string, exceptRoleId?: string) {

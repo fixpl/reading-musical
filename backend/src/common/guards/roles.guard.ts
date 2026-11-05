@@ -2,6 +2,7 @@ import { CanActivate, ExecutionContext, ForbiddenException, Injectable } from "@
 import { Reflector } from "@nestjs/core";
 import type { PlatformRole, ProductionRole } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
+import { ERR_FORBIDDEN_DEFAULT } from "../constants/error-messages";
 import { PLATFORM_ROLES_KEY } from "../decorators/platform-roles.decorator";
 import { PRODUCTION_ROLES_KEY } from "../decorators/production-roles.decorator";
 import type { RequestUser } from "../types/request-user";
@@ -36,7 +37,7 @@ export class RolesGuard implements CanActivate {
     const request = context.switchToHttp().getRequest<RequestLike>();
     const user = request.user;
     if (!user) {
-      throw new ForbiddenException("이 작업을 할 권한이 없어요");
+      throw new ForbiddenException(ERR_FORBIDDEN_DEFAULT);
     }
 
     if (platformRoles?.includes(user.platformRole)) {
@@ -58,12 +59,12 @@ export class RolesGuard implements CanActivate {
     }
 
     if (!productionRoles?.length) {
-      throw new ForbiddenException("이 작업을 할 권한이 없어요");
+      throw new ForbiddenException(ERR_FORBIDDEN_DEFAULT);
     }
 
     const productionId = this.getProductionId(request);
     if (!productionId) {
-      throw new ForbiddenException("이 작업을 할 권한이 없어요");
+      throw new ForbiddenException(ERR_FORBIDDEN_DEFAULT);
     }
 
     const membership = await this.prisma.membership.findFirst({
@@ -76,7 +77,7 @@ export class RolesGuard implements CanActivate {
     });
 
     if (!membership) {
-      throw new ForbiddenException("이 작업을 할 권한이 없어요");
+      throw new ForbiddenException(ERR_FORBIDDEN_DEFAULT);
     }
 
     return true;

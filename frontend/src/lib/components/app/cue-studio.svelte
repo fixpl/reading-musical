@@ -7,6 +7,7 @@
   import XIcon from "@lucide/svelte/icons/x";
   import MonitorPlayIcon from "@lucide/svelte/icons/monitor-play";
   import SkipBackIcon from "@lucide/svelte/icons/skip-back";
+  import { findScriptAnchorIndex, formatMinutesAsClock } from "./cue-studio-text.util";
 
   type Track = {
     id: string;
@@ -275,10 +276,7 @@
     }
   });
 
-  const fmt = (m: number) => {
-    const s = Math.max(0, Math.round(m * 60));
-    return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
-  };
+  const fmt = formatMinutesAsClock;
 
   function segCue(seg: Segment | undefined, trackName: string) {
     if (!seg) return null;
@@ -294,24 +292,7 @@
   const stageSong = $derived(segCue(currentSeg, "음악"));
   const stageScriptExpanded = $derived(fullScriptSceneId === currentSeg?.id);
 
-  function normalized(text: string) {
-    return text.toLocaleLowerCase("ko").replace(/[^0-9a-z가-힣]/g, "");
-  }
-
-  function scriptAnchorIndex(blocks: ScriptBlock[], cue: Cue | null) {
-    if (!cue) return -1;
-    const trigger = cue.trigger?.trim() ?? "";
-    const quoted = [...trigger.matchAll(/[\"'“”‘’]([^\"'“”‘’]{2,})[\"'“”‘’]/g)].map((match) => normalized(match[1]));
-    const triggerText = normalized(trigger);
-    const contentText = normalized(cue.content);
-    return blocks.findIndex((block) => {
-      const blockText = normalized(block.text);
-      if (blockText.length < 2) return false;
-      return quoted.some((text) => blockText.includes(text) || text.includes(blockText))
-        || (blockText.length >= 4 && triggerText.includes(blockText))
-        || (contentText.length >= 4 && (blockText.includes(contentText) || contentText.includes(blockText)));
-    });
-  }
+  const scriptAnchorIndex = findScriptAnchorIndex;
 
   const stageScriptBlocks = $derived.by(() => {
     const blocks = currentSeg?.blocks ?? [];

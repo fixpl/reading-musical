@@ -22,13 +22,25 @@ import {
   UpdateProductionDto
 } from "./dto";
 import { ProductionsService } from "./productions.service";
+import { PositionRequirementsService } from "./position-requirements.service";
+import { ProductionDirectoryService } from "./production-directory.service";
+import { ProductionMembersService } from "./production-members.service";
+import { ProductionReadinessService } from "./production-readiness.service";
+import { StaffAssignmentsService } from "./staff-assignments.service";
 
 @ApiTags("productions")
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Controller("productions")
 export class ProductionsController {
-  constructor(private readonly productionsService: ProductionsService) {}
+  constructor(
+    private readonly productionsService: ProductionsService,
+    private readonly positionRequirements: PositionRequirementsService,
+    private readonly staffAssignments: StaffAssignmentsService,
+    private readonly readiness: ProductionReadinessService,
+    private readonly members: ProductionMembersService,
+    private readonly directory: ProductionDirectoryService
+  ) {}
 
   @Get()
   list(@CurrentUser() user: RequestUser) {
@@ -60,36 +72,36 @@ export class ProductionsController {
   @PlatformRoles("SUPER_ADMIN", "ORG_ADMIN")
   @ProductionRoles("PRODUCER", "DIRECTOR", "STAGE_MANAGER")
   getReadiness(@Param("id") id: string, @CurrentUser() user: RequestUser) {
-    return this.productionsService.getReadiness(id, user);
+    return this.readiness.getReadiness(id, user);
   }
 
   @Get(":id/search")
   search(@Param("id") id: string, @Query() query: SearchProductionQueryDto, @CurrentUser() user: RequestUser) {
-    return this.productionsService.search(id, query, user);
+    return this.directory.search(id, query, user);
   }
 
   @Get(":id/people")
   listPeople(@Param("id") id: string, @CurrentUser() user: RequestUser) {
-    return this.productionsService.listPeople(id, user);
+    return this.directory.listPeople(id, user);
   }
 
   @Get(":id/positions")
   listPositions(@Param("id") id: string, @CurrentUser() user: RequestUser) {
-    return this.productionsService.listPositionRequirements(id, user);
+    return this.positionRequirements.listPositionRequirements(id, user);
   }
 
   @Post(":id/positions")
   @PlatformRoles("SUPER_ADMIN", "ORG_ADMIN")
   @ProductionRoles("PRODUCER")
   createPosition(@Param("id") id: string, @Body() dto: PositionRequirementDto, @CurrentUser() user: RequestUser) {
-    return this.productionsService.createPositionRequirement(id, dto, user);
+    return this.positionRequirements.createPositionRequirement(id, dto, user);
   }
 
   @Put(":id/positions")
   @PlatformRoles("SUPER_ADMIN", "ORG_ADMIN")
   @ProductionRoles("PRODUCER")
   replacePositions(@Param("id") id: string, @Body() dto: ReplacePositionRequirementsDto, @CurrentUser() user: RequestUser) {
-    return this.productionsService.replacePositionRequirements(id, dto, user);
+    return this.positionRequirements.replacePositionRequirements(id, dto, user);
   }
 
   @Patch(":id/positions/:positionId")
@@ -101,14 +113,14 @@ export class ProductionsController {
     @Body() dto: UpdatePositionRequirementDto,
     @CurrentUser() user: RequestUser
   ) {
-    return this.productionsService.updatePositionRequirement(id, positionId, dto, user);
+    return this.positionRequirements.updatePositionRequirement(id, positionId, dto, user);
   }
 
   @Delete(":id/positions/:positionId")
   @PlatformRoles("SUPER_ADMIN", "ORG_ADMIN")
   @ProductionRoles("PRODUCER")
   deletePosition(@Param("id") id: string, @Param("positionId") positionId: string, @CurrentUser() user: RequestUser) {
-    return this.productionsService.deletePositionRequirement(id, positionId, user);
+    return this.positionRequirements.deletePositionRequirement(id, positionId, user);
   }
 
   @Patch(":id/background-video")
@@ -157,14 +169,14 @@ export class ProductionsController {
   @PlatformRoles("SUPER_ADMIN", "ORG_ADMIN")
   @ProductionRoles("PRODUCER", "DIRECTOR", "STAGE_MANAGER")
   listMembers(@Param("id") id: string) {
-    return this.productionsService.listMembers(id);
+    return this.members.listMembers(id);
   }
 
   @Post(":id/members")
   @PlatformRoles("SUPER_ADMIN", "ORG_ADMIN")
   @ProductionRoles("PRODUCER")
   addMembers(@Param("id") id: string, @Body() dto: AddMembersDto, @CurrentUser() user: RequestUser) {
-    return this.productionsService.addMembers(id, dto, user);
+    return this.members.addMembers(id, dto, user);
   }
 
   @Patch(":id/members/:membershipId")
@@ -176,28 +188,28 @@ export class ProductionsController {
     @Body() dto: UpdateMemberDto,
     @CurrentUser() user: RequestUser
   ) {
-    return this.productionsService.updateMember(id, membershipId, dto, user);
+    return this.members.updateMember(id, membershipId, dto, user);
   }
 
   @Delete(":id/members/:membershipId")
   @PlatformRoles("SUPER_ADMIN", "ORG_ADMIN")
   @ProductionRoles("PRODUCER")
   removeMember(@Param("id") id: string, @Param("membershipId") membershipId: string, @CurrentUser() user: RequestUser) {
-    return this.productionsService.removeMember(id, membershipId, user);
+    return this.members.removeMember(id, membershipId, user);
   }
 
   @Post(":id/invitations")
   @PlatformRoles("SUPER_ADMIN", "ORG_ADMIN")
   @ProductionRoles("PRODUCER")
   createInvitation(@Param("id") id: string, @Body() dto: CreateInvitationDto) {
-    return this.productionsService.createInvitation(id, dto);
+    return this.members.createInvitation(id, dto);
   }
 
   @Get(":id/members/:membershipId/staff-assignments")
   @PlatformRoles("SUPER_ADMIN", "ORG_ADMIN")
   @ProductionRoles("PRODUCER", "STAGE_MANAGER")
   getStaffAssignments(@Param("id") id: string, @Param("membershipId") membershipId: string) {
-    return this.productionsService.getStaffAssignments(id, membershipId);
+    return this.staffAssignments.getStaffAssignments(id, membershipId);
   }
 
   @Put(":id/members/:membershipId/staff-assignments")
@@ -209,7 +221,7 @@ export class ProductionsController {
     @Body() dto: PutStaffAssignmentsDto,
     @CurrentUser() user: RequestUser
   ) {
-    return this.productionsService.putStaffAssignments(id, membershipId, dto, user);
+    return this.staffAssignments.putStaffAssignments(id, membershipId, dto, user);
   }
 
   @Post(":id/members/:membershipId/staff-assignments")
@@ -221,24 +233,24 @@ export class ProductionsController {
     @Body() dto: PutStaffAssignmentsDto,
     @CurrentUser() user: RequestUser
   ) {
-    return this.productionsService.putStaffAssignments(id, membershipId, dto, user);
+    return this.staffAssignments.putStaffAssignments(id, membershipId, dto, user);
   }
 }
 
 @ApiTags("invitations")
 @Controller("invitations")
 export class InvitationsController {
-  constructor(private readonly productionsService: ProductionsService) {}
+  constructor(private readonly members: ProductionMembersService) {}
 
   @Get(":token")
   getInvitation(@Param("token") token: string) {
-    return this.productionsService.getInvitation(token);
+    return this.members.getInvitation(token);
   }
 
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
   @Post(":token/accept")
   acceptInvitation(@Param("token") token: string, @CurrentUser() user: RequestUser) {
-    return this.productionsService.acceptInvitation(token, user);
+    return this.members.acceptInvitation(token, user);
   }
 }
