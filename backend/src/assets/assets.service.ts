@@ -15,7 +15,7 @@ import path from "node:path";
 import type { RequestUser } from "../common/types/request-user";
 import { PrismaService } from "../prisma/prisma.service";
 import { AssetPurpose, AssetPolicy, CreateAssetDto } from "./dto";
-import { isProductionAdmin } from "../common/access/is-production-admin";
+import { assertProductionMembership } from "../common/access/assert-production-membership";
 
 const MUSIC_EDIT_ROLES = [ProductionRole.PRODUCER, ProductionRole.MUSIC_DIRECTOR];
 const SCRIPT_EDIT_ROLES = [ProductionRole.PRODUCER, ProductionRole.DIRECTOR];
@@ -367,16 +367,9 @@ export class AssetsService {
   private async assertMembership(productionId: string, user: RequestUser, roles: ProductionRole[]) {
     const active = await this.prisma.production.findFirst({ where: { id: productionId, deletedAt: null }, select: { id: true } });
     if (!active) throw new NotFoundException("공연을 찾을 수 없어요");
-    if (await isProductionAdmin(this.prisma, user, productionId)) {
-      return;
-    }
-    const membership = await this.prisma.membership.findFirst({
-      where: { productionId, userId: user.id, roles: { some: { role: { in: roles } } } },
-      select: { id: true }
+    await assertProductionMembership(this.prisma, user, productionId, roles, {
+      forbiddenMessage: "이 파일 작업을 할 권한이 없어요"
     });
-    if (!membership) {
-      throw new ForbiddenException("이 파일 작업을 할 권한이 없어요");
-    }
   }
 
   private isPersonalProfileImageAsset(asset: { productionId: string | null; kind: AssetKind; mime: string }) {

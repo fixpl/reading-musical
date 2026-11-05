@@ -30,6 +30,7 @@ import {
   UpdateBlockDto
 } from "./dto";
 import { isProductionAdmin } from "../common/access/is-production-admin";
+import { assertProductionMembership } from "../common/access/assert-production-membership";
 
 type ParsedImportBlock = {
   tempId: string;
@@ -777,16 +778,7 @@ export class ScriptsService {
   }
 
   private async assertMembership(productionId: string, user: RequestUser, roles: ProductionRole[]) {
-    if (await isProductionAdmin(this.prisma, user, productionId)) {
-      return;
-    }
-    const membership = await this.prisma.membership.findFirst({
-      where: { productionId, userId: user.id, roles: { some: { role: { in: roles } } } },
-      select: { id: true }
-    });
-    if (!membership) {
-      throw new ForbiddenException("이 작업을 할 권한이 없어요");
-    }
+    await assertProductionMembership(this.prisma, user, productionId, roles);
   }
 
   private async hasAnyRole(productionId: string, user: RequestUser, roles: ProductionRole[]) {

@@ -20,7 +20,8 @@ import {
   UpdateMusicCueDto,
   UpdateMusicTrackDto
 } from "./dto";
-import { isPlatformAdmin, isProductionAdmin } from "../common/access/is-production-admin";
+import { isPlatformAdmin } from "../common/access/is-production-admin";
+import { assertProductionMembership } from "../common/access/assert-production-membership";
 
 const VIEW_ROLES: ProductionRole[] = [
   ProductionRole.PRODUCER,
@@ -346,17 +347,9 @@ export class MusicService {
   }
 
   private async assertMembership(productionId: string, user: RequestUser, roles: ProductionRole[]) {
-    if (await isProductionAdmin(this.prisma, user, productionId)) {
-      return null;
-    }
-    const membership = await this.prisma.membership.findFirst({
-      where: { productionId, userId: user.id, roles: { some: { role: { in: roles } } } },
+    return assertProductionMembership(this.prisma, user, productionId, roles, {
       include: { roles: true, staffAssignments: true }
     });
-    if (!membership) {
-      throw new ForbiddenException("이 작업을 할 권한이 없어요");
-    }
-    return membership;
   }
 
   private assertCanFireCue(user: RequestUser, membership: MembershipContext | null) {

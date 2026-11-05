@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from "@nestjs/common";
 import { Prisma, ProductionRole } from "@prisma/client";
 import { createHash } from "node:crypto";
 import { AssetPurpose } from "../assets/dto";
@@ -7,7 +7,7 @@ import type { RequestUser } from "../common/types/request-user";
 import { PrismaService } from "../prisma/prisma.service";
 import { CreateStageElementDto, CreateStagePlanDto, PutStageSceneNoteDto, UpdateStageElementDto, UpdateStagePlanDto } from "./dto";
 import { buildStageExportPdf, buildStageExportPng, type ExportableStagePlan } from "./stage-export.renderer";
-import { isProductionAdmin } from "../common/access/is-production-admin";
+import { assertProductionMembership } from "../common/access/assert-production-membership";
 
 const VIEW_ROLES: ProductionRole[] = [
   ProductionRole.PRODUCER,
@@ -212,16 +212,7 @@ export class StageService {
   }
 
   private async assertMembership(productionId: string, user: RequestUser, roles: ProductionRole[]) {
-    if (await isProductionAdmin(this.prisma, user, productionId)) {
-      return;
-    }
-    const membership = await this.prisma.membership.findFirst({
-      where: { productionId, userId: user.id, roles: { some: { role: { in: roles } } } },
-      select: { id: true }
-    });
-    if (!membership) {
-      throw new ForbiddenException("이 작업을 할 권한이 없어요");
-    }
+    await assertProductionMembership(this.prisma, user, productionId, roles);
   }
 
   private async assertPlan(productionId: string, planId: string, includeDetail = false) {

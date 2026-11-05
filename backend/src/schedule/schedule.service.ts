@@ -15,6 +15,7 @@ import {
   UpsertAttendanceDto
 } from "./dto";
 import { isProductionAdmin } from "../common/access/is-production-admin";
+import { assertProductionMembership } from "../common/access/assert-production-membership";
 
 const VIEW_ROLES: ProductionRole[] = [
   ProductionRole.PRODUCER,
@@ -1322,15 +1323,9 @@ export class ScheduleService {
   }
 
   private async assertMembership(productionId: string, user: RequestUser, roles: ProductionRole[]) {
-    if (await isProductionAdmin(this.prisma, user, productionId)) return null;
-    const membership = await this.prisma.membership.findFirst({
-      where: { productionId, userId: user.id, roles: { some: { role: { in: roles } } } },
+    return assertProductionMembership(this.prisma, user, productionId, roles, {
       include: { roles: true }
     });
-    if (!membership) {
-      throw new ForbiddenException("이 작업을 할 권한이 없어요");
-    }
-    return membership;
   }
 
   // 등록은 공연 멤버(게스트 제외) 누구나 — 수정·삭제는 아래 assertEditPermission 규칙 유지.
