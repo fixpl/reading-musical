@@ -10,7 +10,8 @@
   import { Label } from "$lib/components/ui/label";
   import { Skeleton } from "$lib/components/ui/skeleton";
   import { Textarea } from "$lib/components/ui/textarea";
-  import { apiRequest, streamNdjson, uploadForm, uploadSignedObject, type StreamEvent } from "$lib/api/client";
+  import { apiRequest, uploadSignedObject } from "$lib/api/client";
+  import AiCueDraftDialog from "$lib/components/app/ai-cue-draft-dialog.svelte";
   import CueStudio from "$lib/components/app/cue-studio.svelte";
   import ChevronLeftIcon from "@lucide/svelte/icons/chevron-left";
   import PlusIcon from "@lucide/svelte/icons/plus";
@@ -88,13 +89,6 @@
 
   type Person = { id: string; user: { name: string } };
 
-  type DraftCue = { track: string; content: string; trigger: string | null; note: string | null; character?: string | null; seconds?: number | null };
-  type DraftLine = { kind: string; speaker: string | null; text: string };
-  type DraftScene = { title: string; summary: string | null; lines: DraftLine[]; cues: DraftCue[] };
-  type DraftAct = { title: string; scenes: DraftScene[] };
-  type AiDraft = { acts: DraftAct[] };
-  type AiStats = { acts: number; scenes: number; cues: number; lines: number; cuesByTrack: Record<string, number> };
-
   const pid = $derived($page.params.pid ?? "");
 
   const PALETTE = [
@@ -156,21 +150,8 @@
     return r ? `${m}분 ${r}초` : `${m}분`;
   }
 
-  // AI 초안 다이얼로그
+  // AI 초안 다이얼로그 — 상태/로직은 ai-cue-draft-dialog.svelte가 소유한다.
   let aiOpen = $state(false);
-  let aiStep = $state<"input" | "preview">("input");
-  let aiText = $state("");
-  let aiScriptTitle = $state("");
-  let aiBusy = $state(false);
-  let aiUploading = $state(false);
-  let aiDraft = $state<AiDraft | null>(null);
-  let aiStats = $state<AiStats | null>(null);
-  let aiProgress = $state<{ done: number; total: number } | null>(null);
-  // 단일 조각 분석처럼 진행률 숫자가 없는 대기에도 경과 시간을 보여준다.
-  let aiElapsed = $state(0);
-  // 적용 대상: "new"(새 대본) 또는 기존 스크립트 id
-  let aiTarget = $state("new");
-  let aiScripts = $state<Array<{ id: string; title: string }>>([]);
 
   // 트랙 관리 다이얼로그
   let tracksOpen = $state(false);
@@ -659,129 +640,6 @@
     }
   }
 
-  async function openAi() {
-    aiStep = "input";
-    aiDraft = null;
-    aiStats = null;
-    aiProgress = null;
-    aiTarget = "new";
-    aiOpen = true;
-    try {
-      aiScripts = await apiRequest<Array<{ id: string; title: string }>>(`/productions/${pid}/scripts`);
-    } catch {
-      aiScripts = [];
-    }
-  }
-
-  async function onAiFile(event: Event) {
-    const input = event.currentTarget as HTMLInputElement;
-    const file = input.files?.[0];
-    input.value = "";
-    if (!file) return;
-    aiUploading = true;
-    try {
-      const form = new FormData();
-      form.append("file", file);
-      const result = await uploadForm<{ text: string; filename: string; chars: number }>(
-        `/productions/${pid}/ai/extract`,
-        form
-      );
-      aiText = result.text;
-      if (!aiScriptTitle.trim()) {
-        aiScriptTitle = file.name.replace(/\.[^.]+$/, "");
-      }
-      toast.success(`파일에서 ${result.chars.toLocaleString()}자를 불러왔어요.`);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "파일을 읽지 못했습니다");
-    } finally {
-      aiUploading = false;
-    }
-  }
-
-  async function generateAi() {
-    if (aiText.trim().length < 80) {
-      toast.error("대본 내용을 80자 이상 붙여넣어 주세요");
-      return;
-    }
-    aiBusy = true;
-    aiProgress = null;
-    aiElapsed = 0;
-    const elapsedTimer = setInterval(() => {
-      aiElapsed += 1;
-    }, 1000);
-    let done = false;
-    // 긴 대본은 조각으로 나눠 처리하므로 넉넉히 기다린다. 그래도 안 끝나면 중단.
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 180_000);
-    try {
-      await streamNdjson(
-        `/productions/${pid}/ai/cue-draft/stream`,
-        { text: aiText },
-        (event: StreamEvent) => {
-          if (event.type === "progress") {
-            aiProgress = { done: Number(event.done) || 0, total: Number(event.total) || 1 };
-          } else if (event.type === "result") {
-            aiDraft = event.draft as AiDraft;
-            aiStats = event.stats as AiStats;
-            aiStep = "preview";
-            done = true;
-            if (typeof event.truncatedChunks === "number" && event.truncatedChunks > 0) {
-              toast.warning("대본이 매우 길어 앞부분만 처리했어요. 나머지는 이어서 한 번 더 만들어 주세요.");
-            } else if (typeof event.failedChunks === "number" && event.failedChunks > 0) {
-              toast.warning(`일부 구간(${event.failedChunks}조각)을 읽지 못했어요. 결과를 확인해 주세요.`);
-            }
-          } else if (event.type === "error") {
-            throw new Error(typeof event.message === "string" ? event.message : "초안을 만들지 못했습니다");
-          }
-        },
-        { signal: controller.signal }
-      );
-      if (!done) {
-        toast.error("초안을 만들지 못했습니다. 다시 시도해 주세요.");
-      }
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") {
-        toast.error("시간이 오래 걸려 멈췄어요. 대본을 막 단위로 나눠 다시 시도해 주세요.");
-      } else {
-        toast.error(error instanceof Error ? error.message : "초안을 만들지 못했습니다");
-      }
-    } finally {
-      clearTimeout(timer);
-      clearInterval(elapsedTimer);
-      aiBusy = false;
-      aiProgress = null;
-    }
-  }
-
-  async function applyAi() {
-    if (!aiDraft) return;
-    aiBusy = true;
-    try {
-      const result = await apiRequest<{ scenes: number; cues: number; blocks: number; appended: boolean }>(
-        `/productions/${pid}/ai/cue-draft/apply`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            scriptTitle: aiTarget === "new" ? aiScriptTitle.trim() || undefined : undefined,
-            targetScriptId: aiTarget === "new" ? undefined : aiTarget,
-            draft: aiDraft
-          })
-        }
-      );
-      toast.success(
-        `${result.appended ? "기존 대본에 이어서 " : ""}장면 ${result.scenes}개 · 대사 ${result.blocks}줄 · 큐 ${result.cues}개를 등록했습니다`
-      );
-      aiOpen = false;
-      aiText = "";
-      aiScriptTitle = "";
-      await load();
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "적용하지 못했습니다");
-    } finally {
-      aiBusy = false;
-    }
-  }
-
   function onStudioEdit(cueId: string) {
     const cue = board?.cues.find((item) => item.id === cueId);
     if (cue && editableSet.has(cue.trackId)) {
@@ -825,7 +683,7 @@
         </div>
       {/if}
       {#if canManage}
-        <Button variant="outline" size="sm" class="h-8 whitespace-nowrap" onclick={openAi}>
+        <Button variant="outline" size="sm" class="h-8 whitespace-nowrap" onclick={() => (aiOpen = true)}>
           <SparklesIcon />
           AI 초안
         </Button>
@@ -919,7 +777,7 @@
       {#if canManage}
         <div class="mt-5 flex flex-wrap justify-center gap-2">
           <Button size="sm" onclick={createDefaultTracks} disabled={trackSaving}>기본 트랙 만들기</Button>
-          <Button size="sm" variant="outline" onclick={openAi}>
+          <Button size="sm" variant="outline" onclick={() => (aiOpen = true)}>
             <SparklesIcon />
             대본으로 초안 만들기
           </Button>
@@ -1239,184 +1097,7 @@
   </Dialog.Content>
 </Dialog.Root>
 
-<!-- AI 초안 -->
-<Dialog.Root bind:open={aiOpen}>
-  <Dialog.Content class="max-h-[85dvh] overflow-y-auto sm:max-w-lg">
-    <Dialog.Header>
-      <Dialog.Title>AI 큐시트 초안</Dialog.Title>
-      <Dialog.Description>
-        {aiStep === "input"
-          ? "대본을 붙여넣으면 장면 구조·대사 본문·배역·부서별 큐까지 한 번에 준비해 드립니다. 등록 전에 확인합니다."
-          : "초안을 확인하고 적용하세요. 적용하면 대본과 큐시트에 함께 등록되고, 이후 자유롭게 고칠 수 있습니다."}
-      </Dialog.Description>
-    </Dialog.Header>
-
-    {#if aiStep === "input"}
-      <div class="grid gap-4">
-        <div class="grid gap-2">
-          <Label for="aiTitle">대본 제목</Label>
-          <Input id="aiTitle" bind:value={aiScriptTitle} maxlength={120} placeholder="예: 통합 리허설 대본" />
-        </div>
-        <div class="grid gap-2">
-          <div class="flex items-center justify-between">
-            <Label for="aiText">대본 내용</Label>
-            <label class="text-primary cursor-pointer text-xs font-medium hover:underline">
-              {aiUploading ? "불러오는 중..." : "파일 불러오기 (txt·docx·pdf)"}
-              <input
-                type="file"
-                accept=".txt,.md,.docx,.pdf,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                class="hidden"
-                disabled={aiUploading}
-                onchange={onAiFile}
-              />
-            </label>
-          </div>
-          <Textarea
-            id="aiText"
-            bind:value={aiText}
-            class="h-64 resize-none overflow-y-auto font-mono text-xs leading-relaxed"
-            placeholder="대본 전체를 붙여넣어 주세요. 한글 파일이나 워드 문서는 내용을 복사해서 붙여넣으면 됩니다. 길어도 괜찮아요 — 긴 대본은 자동으로 나눠서 처리합니다."
-          />
-          <p class="text-muted-foreground text-xs">
-            {aiText.trim().length.toLocaleString()}자
-            {#if aiText.trim().length > 4500}
-              · 약 {Math.ceil(aiText.trim().length / 4500)}조각으로 나눠 처리해요
-            {/if}
-          </p>
-        </div>
-        {#if aiBusy}
-          <div class="bg-muted/60 grid gap-2 rounded-xl px-4 py-3">
-            <div class="flex items-center gap-3">
-              <span class="border-primary/30 border-t-primary size-4 shrink-0 animate-spin rounded-full border-2"></span>
-              <div class="min-w-0 flex-1">
-                <p class="text-sm font-medium">대본을 읽고 장면·대사·큐로 정리하고 있어요</p>
-                <p class="text-muted-foreground mt-0.5 text-xs">
-                  {#if aiProgress && aiProgress.total > 1}
-                    {aiProgress.done}/{aiProgress.total} 조각 처리했어요
-                  {:else}
-                    대본을 읽고 있어요… {aiElapsed}초
-                  {/if}
-                </p>
-              </div>
-              {#if aiProgress && aiProgress.total > 1}
-                <span class="text-primary text-sm font-semibold tabular-nums">
-                  {Math.round((aiProgress.done / aiProgress.total) * 100)}%
-                </span>
-              {/if}
-            </div>
-            {#if aiProgress && aiProgress.total > 1}
-              <div class="bg-border h-1.5 overflow-hidden rounded-full">
-                <div
-                  class="bg-primary h-full rounded-full transition-all duration-300"
-                  style={`width: ${Math.round((aiProgress.done / aiProgress.total) * 100)}%`}
-                ></div>
-              </div>
-            {:else}
-              <div class="bg-border h-1.5 overflow-hidden rounded-full">
-                <div class="bg-primary h-full w-1/3 animate-pulse rounded-full"></div>
-              </div>
-            {/if}
-          </div>
-        {/if}
-        <Dialog.Footer class="gap-2">
-          <Button type="button" variant="ghost" onclick={() => (aiOpen = false)} disabled={aiBusy}>취소</Button>
-          <Button type="button" onclick={generateAi} disabled={aiBusy || aiText.trim().length < 80}>
-            {aiBusy ? "분석 중..." : "초안 만들기"}
-          </Button>
-        </Dialog.Footer>
-      </div>
-    {:else if aiDraft}
-      <div class="grid gap-4">
-        {#if aiStats}
-          <div class="flex flex-wrap gap-1.5">
-            <Badge variant="secondary">막 {aiStats.acts}</Badge>
-            <Badge variant="secondary">장면 {aiStats.scenes}</Badge>
-            <Badge variant="secondary">대사 {aiStats.lines}줄</Badge>
-            <Badge variant="secondary">큐 {aiStats.cues}</Badge>
-            {#each Object.entries(aiStats.cuesByTrack) as [track, count] (track)}
-              <Badge variant="outline">{track} {count}</Badge>
-            {/each}
-          </div>
-        {/if}
-        <div class="border-border/60 grid max-h-80 gap-4 overflow-y-auto rounded-xl border p-4">
-          {#each aiDraft.acts as act, actIndex (actIndex)}
-            <div class="grid gap-3">
-              <p class="text-muted-foreground text-xs font-bold tracking-wide uppercase">{act.title}</p>
-              {#each act.scenes as scene, sceneIndex (sceneIndex)}
-                <div>
-                  <p class="text-sm font-semibold">
-                    {scene.title}
-                    {#if scene.lines?.length}
-                      <span class="text-muted-foreground ms-1 text-xs font-normal">대사 {scene.lines.length}줄</span>
-                    {/if}
-                  </p>
-                  {#if scene.summary}
-                    <p class="text-muted-foreground mt-0.5 text-xs">{scene.summary}</p>
-                  {/if}
-                  {#if scene.cues.length > 0}
-                    <ul class="mt-1.5 grid gap-1">
-                      {#each scene.cues as cue, cueIndex (cueIndex)}
-                        <li class="flex items-start gap-2 text-xs">
-                          <Badge variant="outline" class="shrink-0 px-1.5 py-0 text-[11px]">{cue.track}</Badge>
-                          <span class="min-w-0">
-                            <span class="font-medium">
-                              {#if cue.character}<span class="text-primary">[{cue.character}]</span> {/if}{cue.content}
-                            </span>
-                            {#if cue.seconds}
-                              <span class="text-muted-foreground font-mono"> {cue.seconds}초</span>
-                            {/if}
-                            {#if cue.trigger}
-                              <span class="text-muted-foreground"> — {cue.trigger}</span>
-                            {/if}
-                          </span>
-                        </li>
-                      {/each}
-                    </ul>
-                  {/if}
-                </div>
-              {/each}
-            </div>
-          {/each}
-        </div>
-
-        <div class="grid gap-2">
-          <Label>어디에 등록할까요?</Label>
-          <label class="border-border/60 has-[:checked]:border-primary has-[:checked]:bg-primary/5 flex cursor-pointer items-start gap-2.5 rounded-xl border px-3.5 py-2.5">
-            <input type="radio" name="aiTarget" value="new" bind:group={aiTarget} class="accent-primary mt-0.5 size-4" />
-            <span class="min-w-0">
-              <span class="block text-sm font-medium">새 대본으로 등록</span>
-              <span class="text-muted-foreground block text-xs">새 대본과 큐시트를 만들어요.</span>
-            </span>
-          </label>
-          {#if aiTarget === "new"}
-            <Input bind:value={aiScriptTitle} maxlength={120} placeholder="새 대본 제목 (예: 통합 리허설 대본)" class="ms-6" />
-          {/if}
-          {#each aiScripts as script (script.id)}
-            <label class="border-border/60 has-[:checked]:border-primary has-[:checked]:bg-primary/5 flex cursor-pointer items-start gap-2.5 rounded-xl border px-3.5 py-2.5">
-              <input type="radio" name="aiTarget" value={script.id} bind:group={aiTarget} class="accent-primary mt-0.5 size-4" />
-              <span class="min-w-0">
-                <span class="block text-sm font-medium">기존 대본에 이어붙이기</span>
-                <span class="text-muted-foreground block truncate text-xs">{script.title} — 이 대본 뒤에 장면·큐를 추가</span>
-              </span>
-            </label>
-          {/each}
-        </div>
-
-        <Dialog.Footer class="gap-2 sm:justify-between">
-          <Button type="button" variant="ghost" onclick={() => (aiStep = "input")} disabled={aiBusy}>
-            다시 만들기
-          </Button>
-          <div class="flex gap-2">
-            <Button type="button" variant="ghost" onclick={() => (aiOpen = false)} disabled={aiBusy}>취소</Button>
-            <Button type="button" onclick={applyAi} disabled={aiBusy}>
-              {aiBusy ? "적용 중..." : "큐시트에 적용"}
-            </Button>
-          </div>
-        </Dialog.Footer>
-      </div>
-    {/if}
-  </Dialog.Content>
-</Dialog.Root>
+<AiCueDraftDialog {pid} bind:open={aiOpen} onApplied={load} />
 
 <!-- 트랙 관리 -->
 <Dialog.Root bind:open={tracksOpen}>
