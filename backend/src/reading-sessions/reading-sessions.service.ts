@@ -23,6 +23,7 @@ import {
 } from "./dto";
 import { isPlatformAdmin } from "../common/access/is-production-admin";
 import { assertProductionMembership } from "../common/access/assert-production-membership";
+import { MEMBERSHIP_BASE_INCLUDE } from "../common/prisma-includes/membership.include";
 
 const VIEW_ROLES: ProductionRole[] = [
   ProductionRole.PRODUCER,
@@ -1017,10 +1018,6 @@ export class ReadingSessionsService {
   }
 
   private membershipInclude(): Prisma.MembershipInclude {
-    return {
-      user: { select: { id: true, email: true, name: true, profileType: true, profileComplete: true } },
-      roles: { select: { role: true } },
-      staffAssignments: true
-    };
+    return MEMBERSHIP_BASE_INCLUDE;
   }
 }

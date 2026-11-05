@@ -14,6 +14,7 @@ import {
 } from "./dto";
 import { isProductionAdmin } from "../common/access/is-production-admin";
 import { assertProductionMembership } from "../common/access/assert-production-membership";
+import { MEMBERSHIP_BASE_INCLUDE } from "../common/prisma-includes/membership.include";
 import { escapeIcsText, foldIcsLines, formatIcsDate } from "./schedule-ics.util";
 import { ScheduleNotificationsService } from "./schedule-notifications.service";
 import { attendanceStatusLabel, toJson } from "./schedule-shared.util";
@@ -1006,10 +1007,8 @@ export class ScheduleService {
 
   private membershipInclude() {
     return {
+      ...MEMBERSHIP_BASE_INCLUDE,
       production: { select: { id: true, title: true } },
-      user: { select: { id: true, email: true, name: true, profileType: true, profileComplete: true } },
-      roles: { select: { role: true } },
-      staffAssignments: true,
       castAssignments: { include: { role: { select: { id: true, name: true } } } }
     } satisfies Prisma.MembershipInclude;
   }
