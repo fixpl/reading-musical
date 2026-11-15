@@ -11,6 +11,7 @@ import {
   StaffDiscipline
 } from "@prisma/client";
 import type { RequestUser } from "../common/types/request-user";
+import { NotificationsGateway } from "../notifications/notifications.gateway";
 import { NotificationsService } from "../notifications/notifications.service";
 import { PrismaService } from "../prisma/prisma.service";
 import {
@@ -21,7 +22,6 @@ import {
   StartReadingSessionDto,
   UpdateReadingSessionDto
 } from "./dto";
-import { isPlatformAdmin } from "../common/access/is-production-admin";
 import { assertProductionMembership } from "../common/access/assert-production-membership";
 import { MEMBERSHIP_BASE_INCLUDE } from "../common/prisma-includes/membership.include";
 
@@ -47,6 +47,7 @@ const CUE_FIRE_GATE_ROLES: ProductionRole[] = [...CUE_FIRE_ROLES, ProductionRole
 const CUE_FIRE_STAFF_DISCIPLINES: StaffDiscipline[] = [StaffDiscipline.SOUND, StaffDiscipline.ACCOMPANIST];
 const READING_LIVE_TRANSPORT = "socket.io+polling";
 const READING_LIVE_EVENTS = ["session-started", "page-sync", "cue-fire", "session-ended"];
+const ACTIVE_SCRIPT_SCENE = { act: { script: { deletedAt: null } } } satisfies Prisma.SceneWhereInput;
 
 type MembershipContext = Prisma.MembershipGetPayload<{ include: { roles: true; staffAssignments: true } }>;
 type RunSheetForReading = Prisma.RunSheetGetPayload<{ include: ReturnType<ReadingSessionsService["runSheetInclude"]> }>;
@@ -74,7 +75,8 @@ export class ReadingSessionsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
-    private readonly notifications: NotificationsService
+    private readonly notifications: NotificationsService,
+    private readonly gateway: NotificationsGateway
   ) {}
 
   async listGuestLinks(productionId: string, eventId: string, user: RequestUser) {
@@ -157,6 +159,7 @@ export class ReadingSessionsService {
         afterJson: { revokedAt: revoked.revokedAt?.toISOString() ?? null, label: revoked.label } as Prisma.InputJsonValue
       }
     });
+    this.gateway.disconnectGuestAccess(revoked.id);
     return this.toGuestAccessResponse(revoked);
   }
 
@@ -165,11 +168,11 @@ export class ReadingSessionsService {
       where: { token },
       select: {
         ...this.guestAccessSelect(),
-        production: { select: { id: true, title: true, currentPhase: true, visibility: true } },
+        production: { select: { id: true, title: true, currentPhase: true, visibility: true, deletedAt: true } },
         event: { select: { id: true, title: true, startAt: true, endAt: true } }
       }
     });
-    if (!access) {
+    if (!access || access.production.deletedAt) {
       throw new NotFoundException("게스트 리딩 링크를 찾을 수 없어요");
     }
     if (access.revokedAt) {
@@ -222,7 +225,7 @@ export class ReadingSessionsService {
 
     return {
       guestAccess: this.toGuestAccessResponse(access),
-      production: access.production,
+      production: { id: access.production.id, title: access.production.title, currentPhase: access.production.currentPhase, visibility: access.production.visibility },
       event: { ...event, attendances: [] },
       myMembershipId: null,
       myRoles: [ProductionRole.GUEST],
@@ -251,7 +254,7 @@ export class ReadingSessionsService {
   async getEventWorkspace(productionId: string, eventId: string, user: RequestUser) {
     const membership = await this.assertMembership(productionId, user, VIEW_ROLES);
     const event = await this.assertEvent(productionId, eventId);
-    await this.assertEventVisibility(event.id, membership, user);
+    await this.assertEventVisibility(event.id, membership);
 
     const [production, runSheets, activeSession, endedSessions, scenes, cueFireLogs] = await Promise.all([
       this.prisma.production.findUnique({
@@ -297,8 +300,8 @@ export class ReadingSessionsService {
       event,
       myMembershipId: membership?.id ?? null,
       myRoles,
-      isEventParticipant: isPlatformAdmin(user) || attended || this.hasAnyRole(myRoles, OPERATOR_ROLES),
-      permissions: this.buildPermissions(user, membership),
+      isEventParticipant: membership === null || attended || this.hasAnyRole(myRoles, OPERATOR_ROLES),
+      permissions: this.buildPermissions(membership),
       activeSession,
       endedSessions,
       runSheets,
@@ -322,11 +325,11 @@ export class ReadingSessionsService {
     const membership = await this.assertMembership(productionId, user, VIEW_ROLES);
     const session = await this.assertSession(productionId, sessionId);
     if (session.eventId) {
-      await this.assertEventVisibility(session.eventId, membership, user);
+      await this.assertEventVisibility(session.eventId, membership);
     }
     return {
       session,
-      permissions: this.buildPermissions(user, membership),
+      permissions: this.buildPermissions(membership),
       liveContract: {
         room: session.eventId ? `reading-session:${session.eventId}` : `reading-session:${session.id}`,
         transport: READING_LIVE_TRANSPORT,
@@ -422,13 +425,15 @@ export class ReadingSessionsService {
 
   async fireCue(productionId: string, sessionId: string, dto: FireReadingCueDto, user: RequestUser) {
     const membership = await this.assertMembership(productionId, user, CUE_FIRE_GATE_ROLES);
-    this.assertCanFireCue(user, membership);
+    this.assertCanFireCue(membership);
     const [session, cue] = await Promise.all([this.assertActiveSession(productionId, sessionId), this.assertCue(productionId, dto.cueId)]);
+    await this.resolveExplicitPosition(productionId, cue.sceneId, cue.anchorBlockId);
     if (dto.runSheetItemId) {
       await this.assertRunSheetItemForCue(session.runSheetId, dto.runSheetItemId, cue.id);
     }
 
     const payload = {
+      ...(dto.payload ?? {}),
       cueNumber: cue.cueNumber,
       cueType: cue.cueType,
       trackStartMs: cue.trackStartMs,
@@ -437,8 +442,7 @@ export class ReadingSessionsService {
       runSheetItemId: dto.runSheetItemId ?? null,
       note: dto.note?.trim() || null,
       clientTimeMs: dto.clientTimeMs ?? null,
-      participantAutoplay: false,
-      ...(dto.payload ?? {})
+      participantAutoplay: false
     } satisfies Prisma.InputJsonObject;
 
     const [log, updated] = await this.prisma.$transaction([
@@ -554,11 +558,9 @@ export class ReadingSessionsService {
     return event;
   }
 
-  private async assertEventVisibility(eventId: string, membership: MembershipContext | null, user: RequestUser) {
-    if (isPlatformAdmin(user)) return;
-    if (!membership) {
-      throw new ForbiddenException("이 리딩 일정에 접근할 권한이 없어요");
-    }
+  private async assertEventVisibility(eventId: string, membership: MembershipContext | null) {
+    // null은 assertMembership의 공연별 관리자 검사에서만 만들 수 있다.
+    if (membership === null) return;
     const roles = this.rolesOf(membership);
     if (this.hasAnyRole(roles, OPERATOR_ROLES)) return;
     const count = await this.prisma.attendance.count({ where: { eventId, membershipId: membership.id } });
@@ -630,10 +632,11 @@ export class ReadingSessionsService {
     }
     const firstItem = runSheet?.items[0] ?? null;
     if (firstItem) {
-      return this.positionFromRunSheetItem(firstItem);
+      const position = this.positionFromRunSheetItem(firstItem);
+      return this.resolveExplicitPosition(productionId, position.currentSceneId, position.currentBlockId);
     }
     const firstScene = await this.prisma.scene.findFirst({
-      where: { act: { script: { productionId } } },
+      where: { act: { script: { productionId, deletedAt: null } } },
       orderBy: [{ act: { order: "asc" } }, { order: "asc" }],
       select: { id: true, blocks: { orderBy: { order: "asc" }, take: 1, select: { id: true } } }
     });
@@ -655,7 +658,8 @@ export class ReadingSessionsService {
       if (!item) {
         throw new NotFoundException("진행표 항목을 찾을 수 없어요");
       }
-      return this.positionFromRunSheetItem(item);
+      const position = this.positionFromRunSheetItem(item);
+      return this.resolveExplicitPosition(productionId, position.currentSceneId, position.currentBlockId);
     }
     if (dto.currentSceneId !== undefined || dto.currentBlockId !== undefined) {
       return this.resolveExplicitPosition(productionId, dto.currentSceneId, dto.currentBlockId);
@@ -668,7 +672,7 @@ export class ReadingSessionsService {
     let currentBlockId = blockId || null;
     if (currentBlockId) {
       const block = await this.prisma.sceneBlock.findFirst({
-        where: { id: currentBlockId, scene: { act: { script: { productionId } } } },
+        where: { id: currentBlockId, scene: { act: { script: { productionId, deletedAt: null } } } },
         select: { id: true, sceneId: true }
       });
       if (!block) {
@@ -682,7 +686,7 @@ export class ReadingSessionsService {
     }
     if (currentSceneId) {
       const scene = await this.prisma.scene.findFirst({
-        where: { id: currentSceneId, act: { script: { productionId } } },
+        where: { id: currentSceneId, act: { script: { productionId, deletedAt: null } } },
         select: { id: true }
       });
       if (!scene) {
@@ -791,15 +795,15 @@ export class ReadingSessionsService {
     );
   }
 
-  private buildPermissions(user: RequestUser, membership: MembershipContext | null) {
+  private buildPermissions(membership: MembershipContext | null) {
     const roles = this.rolesOf(membership);
-    const isSuperAdmin = isPlatformAdmin(user);
+    const isScopedAdmin = membership === null;
     return {
-      canStart: isSuperAdmin || this.hasAnyRole(roles, START_END_ROLES),
-      canEnd: isSuperAdmin || this.hasAnyRole(roles, START_END_ROLES),
-      canSyncPage: isSuperAdmin || this.hasAnyRole(roles, PAGE_SYNC_ROLES),
-      canFireCue: this.canFireCue(user, membership),
-      canCompleteRunSheetItems: isSuperAdmin || roles.some((role) => role !== ProductionRole.GUEST),
+      canStart: isScopedAdmin || this.hasAnyRole(roles, START_END_ROLES),
+      canEnd: isScopedAdmin || this.hasAnyRole(roles, START_END_ROLES),
+      canSyncPage: isScopedAdmin || this.hasAnyRole(roles, PAGE_SYNC_ROLES),
+      canFireCue: this.canFireCue(membership),
+      canCompleteRunSheetItems: isScopedAdmin || roles.some((role) => role !== ProductionRole.GUEST),
       participantAutoplay: false
     };
   }
@@ -819,13 +823,13 @@ export class ReadingSessionsService {
     return membership?.roles.map((role) => role.role) ?? [];
   }
 
-  private assertCanFireCue(user: RequestUser, membership: MembershipContext | null) {
-    if (this.canFireCue(user, membership)) return;
+  private assertCanFireCue(membership: MembershipContext | null) {
+    if (this.canFireCue(membership)) return;
     throw new ForbiddenException("음악 큐를 발동할 권한이 없어요");
   }
 
-  private canFireCue(user: RequestUser, membership: MembershipContext | null) {
-    if (isPlatformAdmin(user)) return true;
+  private canFireCue(membership: MembershipContext | null) {
+    if (membership === null) return true;
     const roles = this.rolesOf(membership);
     return this.hasAnyRole(roles, CUE_FIRE_ROLES) || this.hasAnyStaffDiscipline(membership, CUE_FIRE_STAFF_DISCIPLINES);
   }
@@ -840,7 +844,7 @@ export class ReadingSessionsService {
 
   private getProductionScenes(productionId: string) {
     return this.prisma.scene.findMany({
-      where: { act: { script: { productionId } } },
+      where: { act: { script: { productionId, deletedAt: null } } },
       orderBy: [{ act: { order: "asc" } }, { order: "asc" }],
       include: {
         act: { select: { id: true, title: true, order: true } },
@@ -880,9 +884,10 @@ export class ReadingSessionsService {
 
   private itemInclude(): Prisma.RunSheetItemInclude {
     return {
-      scene: { select: { id: true, title: true, order: true, act: { select: { id: true, title: true, order: true } } } },
+      scene: { where: ACTIVE_SCRIPT_SCENE, select: { id: true, title: true, order: true, act: { select: { id: true, title: true, order: true } } } },
       cue: { include: this.cueInclude() },
       stageSceneNote: {
+        where: { scene: ACTIVE_SCRIPT_SCENE },
         select: {
           id: true,
           sceneId: true,
@@ -905,7 +910,7 @@ export class ReadingSessionsService {
 
   private eventInclude(): Prisma.ScheduleEventInclude {
     return {
-      scenes: { include: { scene: { include: { act: { select: { id: true, title: true, order: true } } } } } },
+      scenes: { where: { scene: ACTIVE_SCRIPT_SCENE }, include: { scene: { include: { act: { select: { id: true, title: true, order: true } } } } } },
       musicCues: { include: { cue: { include: this.cueInclude() } } },
       attendances: { include: { membership: { include: this.membershipInclude() } } },
       runSheets: { select: { id: true, title: true, version: true, status: true } },
@@ -916,8 +921,8 @@ export class ReadingSessionsService {
   private cueInclude(): Prisma.MusicCueInclude {
     return {
       track: { select: { id: true, title: true, durationMs: true, assetId: true } },
-      scene: { select: { id: true, title: true, order: true, act: { select: { id: true, title: true, order: true } } } },
-      anchorBlock: { select: { id: true, order: true, type: true, cueLabel: true, text: true } }
+      scene: { where: ACTIVE_SCRIPT_SCENE, select: { id: true, title: true, order: true, act: { select: { id: true, title: true, order: true } } } },
+      anchorBlock: { where: { scene: ACTIVE_SCRIPT_SCENE }, select: { id: true, order: true, type: true, cueLabel: true, text: true } }
     };
   }
 
@@ -960,7 +965,7 @@ export class ReadingSessionsService {
 
   private guestEventInclude(): Prisma.ScheduleEventInclude {
     return {
-      scenes: { include: { scene: { include: { act: { select: { id: true, title: true, order: true } } } } } },
+      scenes: { where: { scene: ACTIVE_SCRIPT_SCENE }, include: { scene: { include: { act: { select: { id: true, title: true, order: true } } } } } },
       musicCues: { include: { cue: { include: this.cueInclude() } } },
       runSheets: { select: { id: true, title: true, version: true, status: true } },
       checklistItems: { select: { id: true, label: true, status: true } }
@@ -988,9 +993,10 @@ export class ReadingSessionsService {
 
   private guestItemInclude(): Prisma.RunSheetItemInclude {
     return {
-      scene: { select: { id: true, title: true, order: true, act: { select: { id: true, title: true, order: true } } } },
+      scene: { where: ACTIVE_SCRIPT_SCENE, select: { id: true, title: true, order: true, act: { select: { id: true, title: true, order: true } } } },
       cue: { include: this.cueInclude() },
       stageSceneNote: {
+        where: { scene: ACTIVE_SCRIPT_SCENE },
         select: {
           id: true,
           sceneId: true,

@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
-import { ArrayMaxSize, ArrayUnique, IsArray, IsInt, IsOptional, IsString, IsUUID, Max, MaxLength, Min, MinLength } from "class-validator";
+import { Type } from "class-transformer";
+import { ArrayMaxSize, ArrayMinSize, ArrayUnique, IsArray, IsBoolean, IsInt, IsISO8601, IsOptional, IsString, IsUUID, Max, MaxLength, Min, MinLength, ValidateNested } from "class-validator";
 
 export class CreateCueTrackDto {
   @ApiProperty({ description: "트랙 이름 — 부서 또는 사람" })
@@ -90,6 +91,11 @@ export class CreateTrackCueDto {
 }
 
 export class UpdateTrackCueDto {
+  @ApiPropertyOptional({ description: "조회한 큐의 수정 시각 — 동시 편집 충돌 확인" })
+  @IsOptional()
+  @IsISO8601()
+  expectedUpdatedAt?: string;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
@@ -157,4 +163,31 @@ export class ReorderTrackCueDto {
   @ArrayUnique()
   @IsUUID("4", { each: true })
   orderedTrackCueIds!: string[];
+}
+
+export class ImportCueRowDto {
+  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(20) cueNumber?: string;
+  @ApiProperty({ description: "부서(트랙) 이름 — 없으면 새 트랙으로 만든다" }) @IsString() @MinLength(1) @MaxLength(40) track!: string;
+  @ApiPropertyOptional({ description: "장면 제목 — 대본의 장면 제목과 맞으면 연결" }) @IsOptional() @IsString() @MaxLength(200) scene?: string;
+  @ApiProperty() @IsString() @MinLength(1) @MaxLength(500) content!: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(200) trigger?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(200) note?: string;
+  @ApiPropertyOptional({ description: "출연(배역) 이름" }) @IsOptional() @IsString() @MaxLength(60) character?: string;
+  @ApiPropertyOptional() @IsOptional() @IsInt() @Min(1) @Max(3600) durationSec?: number | null;
+  @ApiPropertyOptional() @IsOptional() @IsInt() @Min(0) @Max(86_400_000) startMs?: number | null;
+}
+
+export class ImportCuesDto {
+  @ApiProperty({ type: [ImportCueRowDto] })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(500)
+  @ValidateNested({ each: true })
+  @Type(() => ImportCueRowDto)
+  rows!: ImportCueRowDto[];
+
+  @ApiPropertyOptional({ description: "미리보기만 하고 저장하지 않는다" })
+  @IsOptional()
+  @IsBoolean()
+  dryRun?: boolean;
 }

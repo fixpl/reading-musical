@@ -20,7 +20,6 @@ import {
   UpdateMusicCueDto,
   UpdateMusicTrackDto
 } from "./dto";
-import { isPlatformAdmin } from "../common/access/is-production-admin";
 import { assertProductionMembership } from "../common/access/assert-production-membership";
 
 const VIEW_ROLES: ProductionRole[] = [
@@ -324,7 +323,7 @@ export class MusicService {
 
   async fireCue(productionId: string, cueId: string, dto: FireCueDto, user: RequestUser) {
     const membership = await this.assertMembership(productionId, user, FIRE_ROLES);
-    this.assertCanFireCue(user, membership);
+    this.assertCanFireCue(membership);
     const cue = await this.assertCue(productionId, cueId);
     const sessionId = dto.sessionId ? await this.assertSession(productionId, dto.sessionId) : await this.createAdHocSession(productionId, cue);
 
@@ -352,8 +351,9 @@ export class MusicService {
     });
   }
 
-  private assertCanFireCue(user: RequestUser, membership: MembershipContext | null) {
-    if (isPlatformAdmin(user)) return;
+  private assertCanFireCue(membership: MembershipContext | null) {
+    // 다른 조직의 운영자는 이 공연에서 배정받은 역할·직무로만 큐를 실행한다.
+    if (membership === null) return;
     const roles = membership?.roles.map((role) => role.role) ?? [];
     const canFireByRole = roles.some((role) => FIRE_PRIVILEGED_ROLES.includes(role));
     const canFireByStaffDiscipline = membership?.staffAssignments.some((assignment) => FIRE_STAFF_DISCIPLINES.includes(assignment.discipline)) ?? false;

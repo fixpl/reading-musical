@@ -1,3 +1,10 @@
+export const GENDER_LABELS: Record<string, string> = {
+  MALE: "남성",
+  FEMALE: "여성",
+  OTHER: "기타",
+  UNSPECIFIED: "밝히지 않음"
+};
+
 export const PROFILE_TYPE_LABELS: Record<string, string> = {
   ACTOR: "배우",
   STAFF: "스태프",

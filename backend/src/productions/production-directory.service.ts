@@ -3,15 +3,9 @@ import { Prisma, ProductionRole } from "@prisma/client";
 import type { RequestUser } from "../common/types/request-user";
 import { PrismaService } from "../prisma/prisma.service";
 import { SearchProductionQueryDto } from "./dto";
+import { projectProfileDetails } from "./profile-projector";
 import { ProductionAccessService } from "./production-access.service";
-import { maskEmail, searchSnippet, takeSearch } from "./production-shared.util";
-
-const PEOPLE_MANAGER_ROLES: readonly ProductionRole[] = [
-  ProductionRole.PRODUCER,
-  ProductionRole.DIRECTOR,
-  ProductionRole.MUSIC_DIRECTOR,
-  ProductionRole.STAGE_MANAGER
-];
+import { maskEmail, PEOPLE_MANAGER_ROLES, searchSnippet, takeSearch } from "./production-shared.util";
 
 type ProductionSearchResultType = "SCRIPT_BLOCK" | "ROLE" | "MEMBER" | "MUSIC_CUE" | "EVENT";
 
@@ -70,6 +64,7 @@ export class ProductionDirectoryService {
           }
         },
         attendances: {
+          where: access.canViewSensitive ? {} : { membership: { userId: user.id } },
           select: {
             status: true,
             event: { select: { id: true, title: true, type: true, startAt: true } }
@@ -82,7 +77,9 @@ export class ProductionDirectoryService {
 
     const people = memberships.map((membership) => {
       const roles = membership.roles.map((role) => role.role);
-      const attendanceSummary = membership.attendances.reduce<Record<string, number>>((summary, attendance) => {
+      const canReadDetails = access.canViewSensitive || membership.userId === user.id;
+      const attendances = canReadDetails ? membership.attendances : [];
+      const attendanceSummary = attendances.reduce<Record<string, number>>((summary, attendance) => {
         summary[attendance.status] = (summary[attendance.status] ?? 0) + 1;
         return summary;
       }, {});
@@ -96,7 +93,7 @@ export class ProductionDirectoryService {
           email: access.canViewSensitive ? membership.user.email : maskEmail(membership.user.email),
           phone: access.canViewSensitive ? membership.user.phone : null,
           profileType: membership.user.profileType,
-          profileDetails: membership.user.profileDetails,
+          profileDetails: projectProfileDetails(membership.user.profileDetails, canReadDetails),
           profileComplete: membership.user.profileComplete,
           status: membership.user.status,
           photoAssetId: membership.user.photoAssetId,
@@ -109,7 +106,7 @@ export class ProductionDirectoryService {
           role: assignment.role
         })),
         attendanceSummary,
-        recentAttendances: membership.attendances.map((attendance) => ({
+        recentAttendances: attendances.map((attendance) => ({
           status: attendance.status,
           event: attendance.event
         }))
@@ -166,7 +163,7 @@ export class ProductionDirectoryService {
     const [scriptBlocks, roles, memberships, musicCues, events] = await Promise.all([
       this.prisma.sceneBlock.findMany({
         where: {
-          scene: { act: { script: { productionId } } },
+          scene: { act: { script: { productionId, deletedAt: null } } },
           OR: [{ text: contains }, { cueLabel: contains }]
         },
         orderBy: { updatedAt: "desc" },

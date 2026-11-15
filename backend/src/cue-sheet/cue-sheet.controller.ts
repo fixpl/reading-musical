@@ -7,7 +7,7 @@ import { JwtAuthGuard } from "../common/guards/jwt-auth.guard";
 import { RolesGuard } from "../common/guards/roles.guard";
 import type { RequestUser } from "../common/types/request-user";
 import { CueSheetService } from "./cue-sheet.service";
-import { CreateCueTrackDto, CreateTrackCueDto, ReorderTrackCueDto, UpdateCueTrackDto, UpdateTrackCueDto } from "./dto";
+import { CreateCueTrackDto, CreateTrackCueDto, ImportCuesDto, ReorderTrackCueDto, UpdateCueTrackDto, UpdateTrackCueDto } from "./dto";
 
 @ApiTags("cue-sheet")
 @ApiBearerAuth()
@@ -59,6 +59,12 @@ export class CueSheetController {
     @CurrentUser() user: RequestUser
   ) {
     return this.cueSheetService.removeTrack(productionId, trackId, user);
+  }
+
+  // 엑셀(CSV)에서 큐를 한꺼번에 가져온다(dryRun=true면 미리보기만).
+  @Post("import")
+  importCues(@Param("productionId") productionId: string, @Body() dto: ImportCuesDto, @CurrentUser() user: RequestUser) {
+    return this.cueSheetService.importCues(productionId, dto, user);
   }
 
   @Post("tracks/:trackId/cues")

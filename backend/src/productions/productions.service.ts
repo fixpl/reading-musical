@@ -1,6 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
-import { AssetKind, Phase, PlatformRole, ProductionRole, ProfileType, Visibility } from "@prisma/client";
-import type { Prisma } from "@prisma/client";
+import { AssetKind, Phase, PlatformRole, Prisma, ProductionRole, ProfileType, Visibility } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import type { RequestUser } from "../common/types/request-user";
 import {
@@ -11,10 +10,13 @@ import {
   UpdateProductionDto
 } from "./dto";
 import { checklistPhaseCreateDataFromTemplates } from "../checklist/checklist-template-seed";
+import { cancelProductionRecruitments } from "../recruitment/recruitment-lifecycle";
+import { NotificationsGateway } from "../notifications/notifications.gateway";
+import { productionCapabilities } from "./production-capabilities";
 import { ProductionAccessService } from "./production-access.service";
 import { ProductionActivityLogService } from "./production-activity-log.service";
 import { ProductionNotificationsService } from "./production-notifications.service";
-import { assertDateRange, optionalText, requiredText, titleTakenException } from "./production-shared.util";
+import { assertDateRange, optionalText, PEOPLE_MANAGER_ROLES, requiredText, titleTakenException } from "./production-shared.util";
 
 /**
  * 공연 핵심 CRUD(생성/조회/수정/보관/삭제/복제)만 담당한다.
@@ -28,7 +30,8 @@ export class ProductionsService {
     private readonly prisma: PrismaService,
     private readonly access: ProductionAccessService,
     private readonly activityLog: ProductionActivityLogService,
-    private readonly productionNotifications: ProductionNotificationsService
+    private readonly productionNotifications: ProductionNotificationsService,
+    private readonly gateway: NotificationsGateway
   ) {}
 
   async listForUser(user: RequestUser) {
@@ -40,14 +43,31 @@ export class ProductionsService {
       });
     }
 
-    // 조직 운영자는 소속 조직의 공연을 모두 본다(멤버로 지정돼 있지 않아도).
+    // 소속 조직 운영과 다른 조직에서의 공연 참여를 함께 보여 주되 권한은 공연별로 계산한다.
     if (user.platformRole === "ORG_ADMIN") {
       const caller = await this.prisma.user.findUnique({ where: { id: user.id }, select: { organizationId: true } });
       if (caller?.organizationId) {
-        return this.prisma.production.findMany({
-          where: { archived: false, deletedAt: null, organizationId: caller.organizationId },
-          orderBy: { createdAt: "desc" },
-          include: this.access.productionListInclude()
+        const [productions, memberships] = await Promise.all([
+          this.prisma.production.findMany({
+            where: { archived: false, deletedAt: null, OR: [
+              { organizationId: caller.organizationId },
+              { memberships: { some: { userId: user.id } } }
+            ] },
+            orderBy: { createdAt: "desc" },
+            include: this.access.productionListInclude()
+          }),
+          this.prisma.membership.findMany({ where: { userId: user.id }, include: { roles: true } })
+        ]);
+        return productions.map((production) => {
+          const membership = memberships.find((item) => item.productionId === production.id);
+          return {
+            ...production,
+            canManageProduction: production.organizationId === caller.organizationId ||
+              Boolean(membership?.roles.some((role) => PEOPLE_MANAGER_ROLES.includes(role.role))),
+            ...(membership ? { myMembership: {
+              id: membership.id, primaryRole: membership.primaryRole, roles: membership.roles.map((role) => role.role)
+            } } : {})
+          };
         });
       }
     }
@@ -68,6 +88,7 @@ export class ProductionsService {
       .filter((membership) => !membership.production.archived && !membership.production.deletedAt)
       .map((membership) => ({
         ...membership.production,
+        canManageProduction: membership.roles.some((role) => PEOPLE_MANAGER_ROLES.includes(role.role)),
         myMembership: {
           id: membership.id,
           primaryRole: membership.primaryRole,
@@ -284,11 +305,16 @@ export class ProductionsService {
     if (!production) {
       throw new NotFoundException("찾을 수 없어요");
     }
-    const archived = await this.prisma.production.update({
-      where: { id: productionId },
-      data: { archived: true, visibility: Visibility.DRAFT },
-      include: this.access.productionListInclude()
-    });
+    const archived = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.production.update({
+        where: { id: productionId },
+        data: { archived: true, visibility: Visibility.DRAFT },
+        include: this.access.productionListInclude()
+      });
+      await this.clearShowcasePublication(tx, productionId);
+      await cancelProductionRecruitments(tx, productionId, user.id);
+      return result;
+    }, { timeout: 30000 });
     await this.activityLog.log({
       productionId,
       organizationId: production.organizationId,
@@ -316,11 +342,16 @@ export class ProductionsService {
     if (production.deletedAt) {
       return { id: production.id, deletedAt: production.deletedAt };
     }
-    const deleted = await this.prisma.production.update({
-      where: { id: productionId },
-      data: { deletedAt: new Date() },
-      select: { id: true, deletedAt: true }
-    });
+    const deleted = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.production.update({
+        where: { id: productionId },
+        data: { deletedAt: new Date() },
+        select: { id: true, deletedAt: true }
+      });
+      await this.clearShowcasePublication(tx, productionId);
+      await cancelProductionRecruitments(tx, productionId, user.id);
+      return result;
+    }, { timeout: 30000 });
     await this.activityLog.log({
       productionId,
       organizationId: production.organizationId,
@@ -332,6 +363,14 @@ export class ProductionsService {
       beforeJson: { deletedAt: null },
       afterJson: { deletedAt: deleted.deletedAt }
     });
+    // 삭제 커밋 후, 이 공연의 게스트 링크로 붙어 있는 소켓을 끊는다(다음 이벤트 전까지 남지 않게).
+    const guestAccesses = await this.prisma.guestReadingAccess.findMany({
+      where: { productionId },
+      select: { id: true }
+    });
+    for (const access of guestAccesses) {
+      this.gateway.disconnectGuestAccess(access.id);
+    }
     return deleted;
   }
 
@@ -342,10 +381,15 @@ export class ProductionsService {
     if (!production) {
       throw new NotFoundException("찾을 수 없어요");
     }
-    const restored = await this.prisma.production.update({
-      where: { id: productionId },
-      data: { deletedAt: null },
-      include: this.access.productionListInclude()
+    const restored = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.production.update({
+        where: { id: productionId },
+        data: { deletedAt: null },
+        include: this.access.productionListInclude()
+      });
+      // 예전 삭제 데이터에 공개본이 남아 있어도 복구만으로 다시 게시하지 않는다.
+      if (production.deletedAt) await this.clearShowcasePublication(tx, productionId);
+      return result;
     });
     await this.activityLog.log({
       productionId,
@@ -521,5 +565,43 @@ export class ProductionsService {
     if (!dbUser || !allowedProfileTypes.includes(dbUser.profileType)) {
       throw new ForbiddenException("공연 생성은 기획자, 연출자, 음악감독, 무대감독 또는 관리자만 할 수 있어요");
     }
+  }
+
+  private async clearShowcasePublication(tx: Prisma.TransactionClient, productionId: string) {
+    await tx.productionShowcase.updateMany({
+      where: { productionId, publishedAt: { not: null } },
+      data: { published: Prisma.DbNull, publishedAt: null, publishedById: null, revision: { increment: 1 } }
+    });
+  }
+
+  async getCapabilities(productionId: string, user: RequestUser) {
+    const [production, caller, membership] = await Promise.all([
+      this.prisma.production.findFirst({
+        where: { id: productionId, deletedAt: null },
+        select: { organizationId: true, archived: true }
+      }),
+      this.prisma.user.findUnique({
+        where: { id: user.id },
+        select: { status: true, platformRole: true, organizationId: true }
+      }),
+      this.prisma.membership.findUnique({
+        where: { userId_productionId: { userId: user.id, productionId } },
+        select: { roles: { select: { role: true } } }
+      })
+    ]);
+    if (!production || !caller || caller.status !== "ACTIVE") {
+      throw new NotFoundException("공연을 찾을 수 없어요");
+    }
+    const capabilities = productionCapabilities({
+      platformRole: caller.platformRole,
+      organizationId: caller.organizationId,
+      productionOrganizationId: production.organizationId,
+      archived: production.archived,
+      roles: membership?.roles.map((role) => role.role) ?? []
+    });
+    if (!membership && !capabilities.canEditProduction) {
+      throw new NotFoundException("공연을 찾을 수 없어요");
+    }
+    return capabilities;
   }
 }

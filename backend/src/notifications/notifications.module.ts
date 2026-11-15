@@ -9,6 +9,6 @@ import { NotificationsService } from "./notifications.service";
   imports: [PrismaModule, JwtModule.register({})],
   controllers: [NotificationsController],
   providers: [NotificationsService, NotificationsGateway],
-  exports: [NotificationsService]
+  exports: [NotificationsService, NotificationsGateway]
 })
 export class NotificationsModule {}

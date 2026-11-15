@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { ForbiddenException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import type { RequestUser } from "../common/types/request-user";
@@ -118,9 +119,26 @@ export class NotificationsService {
 
   async createNotifications(inputs: CreateNotificationInput[]) {
     const unique = this.uniqueInputs(inputs);
+    if (unique.length === 0) return [];
+    const ids = unique.map(() => randomUUID());
+    const rows = await this.prisma.notification.createManyAndReturn({
+      data: unique.map((input, index) => ({
+        id: ids[index],
+        userId: input.userId,
+        productionId: input.productionId ?? null,
+        type: input.type,
+        payload: input.payload ?? {}
+      })),
+      include: { production: { select: { id: true, title: true, currentPhase: true } } }
+    });
+    const byId = new Map(rows.map((row) => [row.id, row]));
     const created = [];
-    for (const input of unique) {
-      created.push(await this.createNotification(input));
+    for (let index = 0; index < unique.length; index += 1) {
+      const row = byId.get(ids[index]);
+      if (!row) continue;
+      const serialized = this.serialize(row);
+      this.gateway.emitNotificationCreated(unique[index].userId, serialized);
+      created.push(serialized);
     }
     return created;
   }
@@ -156,11 +174,13 @@ export class NotificationsService {
 
   private serialize(notification: NotificationWithProduction) {
     const payload = this.toPayload(notification.payload);
-    const presentation = this.presentation(notification.type, notification.productionId, payload);
+    const presentation = this.presentation(notification.type, notification.productionId, payload, notification.production?.title);
     return {
       id: notification.id,
       productionId: notification.productionId,
-      production: notification.production,
+      production: notification.type === "RECRUITMENT_APPLICATION_UPDATED" && notification.production
+        ? { id: notification.production.id, title: notification.production.title }
+        : notification.production,
       type: notification.type,
       title: presentation.title,
       body: presentation.body,
@@ -176,7 +196,7 @@ export class NotificationsService {
     return typeof payload === "object" && payload !== null && !Array.isArray(payload) ? payload : {};
   }
 
-  private presentation(type: string, productionId: string | null, payload: Record<string, unknown>) {
+  private presentation(type: string, productionId: string | null, payload: Record<string, unknown>, currentProductionTitle?: string) {
     const eventId = this.stringValue(payload.eventId);
     const scriptTitle = this.stringValue(payload.scriptTitle);
     const cueNumber = this.stringValue(payload.cueNumber);
@@ -188,6 +208,29 @@ export class NotificationsService {
     const beforeRoles = this.stringListValue(payload.beforeRoles);
     const productionRoot = productionId ? `/app/p/${productionId}` : "/app";
 
+    if (type === "RECRUITMENT_APPLICATION_UPDATED") {
+      const target = this.stringValue(payload.href);
+      return {
+        title: `${currentProductionTitle ? `${currentProductionTitle} · ` : ""}${titleFromPayload || "지원 상태가 바뀌었어요"}`,
+        body: this.stringValue(payload.body) || "내 지원 현황에서 안내를 확인해 주세요.",
+        href: target === productionRoot && productionId ? productionRoot : "/app/applications"
+      };
+    }
+
+    if (type === "board.notice_created") {
+      return {
+        title: "새 공지가 올라왔어요",
+        body: `${this.stringValue(payload.authorName) || "제작진"}: ${this.stringValue(payload.postTitle) || "공지"}`,
+        href: `${productionRoot}/board/${this.stringValue(payload.postId)}`
+      };
+    }
+    if (type === "board.comment_created") {
+      return {
+        title: payload.mine === true ? "내 글에 댓글이 달렸어요" : "내가 댓글 단 글에 새 댓글이 있어요",
+        body: `${this.stringValue(payload.authorName) || "멤버"}: ${this.stringValue(payload.snippet) || this.stringValue(payload.postTitle)}`,
+        href: `${productionRoot}/board/${this.stringValue(payload.postId)}`
+      };
+    }
     if (type === "profile.request") {
       return {
         title: "프로필 보완 요청",

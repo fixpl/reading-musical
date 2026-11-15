@@ -121,9 +121,27 @@ export class SearchUsersQueryDto {
   @Min(1)
   @Max(50)
   take?: number;
+
+  @ApiPropertyOptional({ default: 0, minimum: 0, maximum: 2000, description: "앞에서 건너뛸 개수(페이지 넘김)" })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(2000)
+  skip?: number;
 }
 
 export class UpdateProfileDto {
+  @ApiPropertyOptional({ description: "새 선택 프로필 정보 수집·이용 동의. 삭제만 할 때는 불필요." })
+  @IsOptional()
+  @IsBoolean()
+  profilePrivacyConsent?: boolean;
+
+  @ApiPropertyOptional({ description: "확인한 PROFILE_PRIVACY 문서 ID" })
+  @IsOptional()
+  @IsUUID()
+  profilePrivacyDocumentId?: string;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
@@ -132,7 +150,7 @@ export class UpdateProfileDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
-  phone?: string;
+  phone?: string | null;
 
   @ApiPropertyOptional({ enum: ProfileType })
   @IsOptional()

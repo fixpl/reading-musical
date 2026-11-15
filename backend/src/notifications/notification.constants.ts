@@ -1,10 +1,12 @@
 export const CHANGE_NOTIFICATION_TYPES = [
+  "RECRUITMENT_APPLICATION_UPDATED",
   "production.member_removed",
   "production.published",
   "schedule.event_created",
   "schedule.event_updated",
   "schedule.event_canceled",
   "schedule.attendance_reminder",
+  "board.notice_created",
   "script.version_created",
   "script.version_restored",
   "music.cue_created",

@@ -80,7 +80,7 @@ export class ScriptNotificationsService {
     type: ScriptChangeType;
     payload: Record<string, unknown>;
   }) {
-    const action = input.type === "script.version_created" ? "새 대본 버전이 저장되었습니다." : "대본 버전이 복원되었습니다.";
+    const action = input.type === "script.version_created" ? "새 대본 버전이 저장됐어요." : "대본 버전이 복원됐어요.";
     const label = typeof input.payload.label === "string" ? input.payload.label : null;
     return [
       `${input.recipientName}님,`,

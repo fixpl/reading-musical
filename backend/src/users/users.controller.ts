@@ -38,6 +38,14 @@ export class UsersController {
     return this.usersService.updateMySettings(user.id, dto);
   }
 
+  @RateLimit({
+    name: "users.password.change",
+    defaultLimit: 10,
+    defaultWindowMs: 60_000,
+    limitEnv: "RATE_LIMIT_PASSWORD_CHANGE_LIMIT",
+    windowMsEnv: "RATE_LIMIT_PASSWORD_CHANGE_WINDOW_MS",
+    keyMode: "user-or-ip"
+  })
   @Patch("me/password")
   changeMyPassword(@CurrentUser() user: RequestUser, @Body() dto: ChangePasswordDto) {
     return this.usersService.changeMyPassword(user.id, dto);

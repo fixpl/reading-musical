@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Header, Param, ParseUUIDPipe, Patch, Post, Query, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
 import { PlatformRoles } from "../common/decorators/platform-roles.decorator";
@@ -8,7 +8,7 @@ import { RateLimitGuard } from "../common/guards/rate-limit.guard";
 import { RolesGuard } from "../common/guards/roles.guard";
 import type { RequestUser } from "../common/types/request-user";
 import { InquiriesService } from "./inquiries.service";
-import { AdminInquiryListQueryDto, ConvertInquiryDto, CreateInquiryDto, UpdateInquiryDto } from "./dto";
+import { AdminInquiryListQueryDto, ConvertInquiryDto, CreateInquiryDto, LinkInquiryDto, ReplyInquiryDto, UpdateInquiryDto } from "./dto";
 
 @ApiTags("inquiries")
 @Controller("inquiries")
@@ -24,7 +24,7 @@ export class InquiriesController {
     windowMsEnv: "RATE_LIMIT_INQUIRY_WINDOW_MS",
     keyMode: "ip"
   })
-  @Post()
+  @Post() @Header("Cache-Control", "no-store")
   create(@Body() dto: CreateInquiryDto) {
     return this.inquiriesService.create(dto);
   }
@@ -44,17 +44,23 @@ export class AdminInquiriesController {
   }
 
   @Get(":inquiryId")
-  detail(@Param("inquiryId") inquiryId: string) {
+  detail(@Param("inquiryId", ParseUUIDPipe) inquiryId: string) {
     return this.inquiriesService.getForAdmin(inquiryId);
   }
 
   @Patch(":inquiryId")
-  update(@Param("inquiryId") inquiryId: string, @Body() dto: UpdateInquiryDto, @CurrentUser() user: RequestUser) {
+  update(@Param("inquiryId", ParseUUIDPipe) inquiryId: string, @Body() dto: UpdateInquiryDto, @CurrentUser() user: RequestUser) {
     return this.inquiriesService.update(inquiryId, dto, user);
   }
 
+  @Post(":inquiryId/reply")
+  reply(@Param("inquiryId", ParseUUIDPipe) id: string, @Body() dto: ReplyInquiryDto, @CurrentUser() user: RequestUser) { return this.inquiriesService.reply(id, dto, user); }
+
+  @Post(":inquiryId/link")
+  link(@Param("inquiryId", ParseUUIDPipe) id: string, @Body() dto: LinkInquiryDto, @CurrentUser() user: RequestUser) { return this.inquiriesService.link(id, dto, user); }
+
   @Post(":inquiryId/convert")
-  convert(@Param("inquiryId") inquiryId: string, @Body() dto: ConvertInquiryDto, @CurrentUser() user: RequestUser) {
+  convert(@Param("inquiryId", ParseUUIDPipe) inquiryId: string, @Body() dto: ConvertInquiryDto, @CurrentUser() user: RequestUser) {
     return this.inquiriesService.convertToProduction(inquiryId, dto, user);
   }
 }

@@ -10,11 +10,18 @@ coverage/
 !.env.*.example
 *.log
 .DS_Store
-.claude
+# Share the agent workflow (agents, skills, project settings); keep local state private.
+.claude/*
+!.claude/agents/
+!.claude/skills/
+!.claude/settings.json
 .playwright-mcp
 # local tooling state
 .omx/
 .local-dev/
+
+# Local verification screenshots and logs (kept out of the repository).
+artifacts/
 
 # Runtime asset bodies are local/persistent data, not source code.
 .asset-objects/
@@ -29,4 +36,28 @@ tests/smoke/*
 !tests/smoke/performance-timeline-contract.cjs
 !tests/smoke/composition-ui-contract.cjs
 !tests/smoke/local-dev-contract.mjs
+!tests/smoke/setup-production-contract.mjs
+!tests/smoke/rehearsal-timeline-contract.cjs
+!tests/smoke/reader-preferences-contract.cjs
+!tests/smoke/checklist-state-contract.cjs
+!tests/smoke/operations-dashboard-contract.cjs
+!tests/smoke/rehearsal-lanes-contract.cjs
+!tests/smoke/community-realtime-contract.cjs
+!tests/smoke/production-cache-contract.cjs
+!tests/smoke/client-session-boundary-contract.cjs
+!tests/smoke/registration-email-contract.cjs
+!tests/smoke/workspace-navigation-contract.cjs
+!tests/smoke/media-session-boundary-contract.cjs
+!tests/smoke/showcase-image-upload-contract.cjs
+!tests/smoke/cuesheet-import-session-contract.cjs
+!tests/smoke/staff-assignment-editor-contract.cjs
+!tests/smoke/scene-line-draft-contract.cjs
+!tests/smoke/timeline-export-contract.cjs
+!tests/smoke/guest-reading-lifecycle-contract.cjs
+!tests/smoke/confirm-dialog-contract.cjs
+!tests/smoke/ui-standard-contract.cjs
 PRD.md
+
+# Storybook
+storybook-static/
+*storybook.log

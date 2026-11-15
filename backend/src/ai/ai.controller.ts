@@ -1,4 +1,4 @@
-import { Body, Controller, Param, Post, Res, UploadedFile, UseGuards, UseInterceptors } from "@nestjs/common";
+import { Body, Controller, Get, Param, Post, Res, UploadedFile, UseGuards, UseInterceptors } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
 import type { Response } from "express";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
@@ -11,7 +11,7 @@ import { RateLimit } from "../common/decorators/rate-limit.decorator";
 import { RolesGuard } from "../common/guards/roles.guard";
 import type { RequestUser } from "../common/types/request-user";
 import { AiService } from "./ai.service";
-import { ApplyCueDraftDto, GenerateCueDraftDto } from "./dto";
+import { ApplyCueDraftDto, GenerateCueDraftDto, MatchMediaDto } from "./dto";
 
 type UploadedScriptFile = { buffer: Buffer; originalname: string; mimetype: string; size: number };
 
@@ -23,6 +23,12 @@ type UploadedScriptFile = { buffer: Buffer; originalname: string; mimetype: stri
 @Controller("productions/:productionId/ai")
 export class AiController {
   constructor(private readonly aiService: AiService) {}
+
+  // 대본 등록 마법사가 열릴 때 AI 모델이 응답하는지 미리 알려 준다(결과는 1분 동안 재사용).
+  @Get("status")
+  status(@Param("productionId") productionId: string, @CurrentUser() user: RequestUser) {
+    return this.aiService.status(productionId, user);
+  }
 
   @Post("cue-draft")
   @UseGuards(RateLimitGuard)
@@ -37,9 +43,10 @@ export class AiController {
   generate(
     @Param("productionId") productionId: string,
     @Body() dto: GenerateCueDraftDto,
-    @CurrentUser() user: RequestUser
+    @CurrentUser() user: RequestUser,
+    @Res({ passthrough: true }) res: Response
   ) {
-    return this.aiService.generateCueDraft(productionId, dto, user);
+    return this.whileConnected(res, (signal) => this.aiService.generateCueDraft(productionId, dto, user, undefined, signal));
   }
 
   // 진행 상황을 NDJSON으로 흘려보낸다. 조각마다 progress, 마지막에 result(또는 error).
@@ -70,7 +77,7 @@ export class AiController {
     };
     try {
       const result = await this.aiService.generateCueDraft(productionId, dto, user,
-        (done, total) => write({ type: "progress", done, total }), controller.signal
+        (done, total, stage) => write({ type: "progress", done, total, ...(stage ? { stage } : {}) }), controller.signal
       );
       write({ type: "result", ...result });
     } catch (error) {
@@ -103,6 +110,38 @@ export class AiController {
     return this.aiService.extractTextFromUpload(productionId, user, file);
   }
 
+  @Post("cue-sheet/extract")
+  @UseGuards(RateLimitGuard)
+  @RateLimit({ name: "ai.extract-cue-sheet", defaultLimit: 12, defaultWindowMs: 60_000, keyMode: "user-or-ip" })
+  @UseInterceptors(FileInterceptor("file", { limits: { fileSize: 2 * 1024 * 1024, files: 1 } }))
+  extractCueSheet(
+    @Param("productionId") productionId: string,
+    @UploadedFile() file: UploadedScriptFile | undefined,
+    @CurrentUser() user: RequestUser
+  ) {
+    return this.aiService.extractCueSheet(productionId, user, file);
+  }
+
+  // 영상·음원 파일 이름과 장면 제목·내용으로 어느 장면에 쓸지 추천한다(내용은 보지 않는다).
+  @Post("match-media")
+  @UseGuards(RateLimitGuard)
+  @RateLimit({
+    name: "ai.match-media",
+    defaultLimit: 10,
+    defaultWindowMs: 60_000,
+    limitEnv: "RATE_LIMIT_AI_MATCH_LIMIT",
+    windowMsEnv: "RATE_LIMIT_AI_MATCH_WINDOW_MS",
+    keyMode: "user-or-ip"
+  })
+  matchMedia(
+    @Param("productionId") productionId: string,
+    @Body() dto: MatchMediaDto,
+    @CurrentUser() user: RequestUser,
+    @Res({ passthrough: true }) res: Response
+  ) {
+    return this.whileConnected(res, (signal) => this.aiService.matchMedia(productionId, dto.fileNames, user, signal));
+  }
+
   @Post("cue-draft/apply")
   @UseGuards(RateLimitGuard)
   @RateLimit({
@@ -119,5 +158,16 @@ export class AiController {
     @CurrentUser() user: RequestUser
   ) {
     return this.aiService.applyCueDraft(productionId, dto, user);
+  }
+
+  private async whileConnected<T>(res: Response, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const controller = new AbortController();
+    const onClose = () => controller.abort();
+    res.once("close", onClose);
+    try {
+      return await work(controller.signal);
+    } finally {
+      res.off("close", onClose);
+    }
   }
 }

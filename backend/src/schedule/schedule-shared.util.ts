@@ -1,7 +1,14 @@
-import type { Prisma } from "@prisma/client";
-import { AttendanceStatus } from "@prisma/client";
+import { AttendanceStatus, type EventType, type Prisma } from "@prisma/client";
 
 /** schedule 모듈 전체(핵심 서비스 + 알림 서비스)가 공유하는 순수 포맷터/유틸. */
+
+export const EVENT_TYPE_LABELS: Record<EventType, string> = {
+  READING: "리딩",
+  MUSIC_PRACTICE: "음악연습",
+  REHEARSAL: "리허설",
+  ENSEMBLE: "전체연습",
+  PERFORMANCE: "공연"
+};
 
 export function attendanceStatusLabel(status: AttendanceStatus): string {
   switch (status) {

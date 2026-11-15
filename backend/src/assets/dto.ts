@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { AssetKind } from "@prisma/client";
-import { IsEnum, IsInt, IsOptional, IsString, IsUUID, Min, MinLength } from "class-validator";
+import { IsBoolean, IsEnum, IsInt, IsOptional, IsString, IsUUID, Min, MinLength } from "class-validator";
 
 export enum AssetPurpose {
   MUSIC_TRACK = "MUSIC_TRACK",
@@ -8,6 +8,7 @@ export enum AssetPurpose {
   STAGE_EXPORT = "STAGE_EXPORT",
   RUN_SHEET_EXPORT = "RUN_SHEET_EXPORT",
   PROFILE_PHOTO = "PROFILE_PHOTO",
+  SHOWCASE_IMAGE = "SHOWCASE_IMAGE",
   CHECKLIST_EVIDENCE = "CHECKLIST_EVIDENCE",
   BACKGROUND_VIDEO = "BACKGROUND_VIDEO",
   CUE_MEDIA = "CUE_MEDIA",
@@ -15,6 +16,16 @@ export enum AssetPurpose {
 }
 
 export class CreateAssetDto {
+  @ApiPropertyOptional({ description: "프로필 사진 업로드 전에 확인한 선택 개인정보 동의" })
+  @IsOptional()
+  @IsBoolean()
+  profilePrivacyConsent?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  profilePrivacyDocumentId?: string;
+
   @ApiProperty({ enum: AssetPurpose })
   @IsEnum(AssetPurpose)
   purpose!: AssetPurpose;

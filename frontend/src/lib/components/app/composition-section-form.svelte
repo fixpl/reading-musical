@@ -22,36 +22,38 @@
     event.preventDefault();
     error = "";
     try {
-      if (!form.title.trim()) throw new Error("장·막의 제목을 입력하세요.");
+      if (!form.title.trim()) throw new Error("장·막의 제목을 입력해 주세요.");
       await onSave({ title: form.title.trim(), kind: form.kind, parentId: form.parentId || null, scriptText: form.scriptText, lyrics: form.lyrics,
         startMs: secondsInput(form.start), durationMs: secondsInput(form.duration, true, 1000),
         backgroundMode: form.backgroundMode, musicMode: form.musicMode, scoreMode: form.scoreMode });
-    } catch (failure) { error = failure instanceof Error ? failure.message : "입력 내용을 확인하세요."; }
+    } catch (failure) { error = failure instanceof Error ? failure.message : "입력 내용을 확인해 주세요."; }
   }
 </script>
 
 <form onsubmit={save} class="space-y-5">
   <fieldset disabled={!canEdit || busy} class="space-y-4 disabled:opacity-80">
-    <div class="grid gap-3 sm:grid-cols-[minmax(0,1fr)_110px]">
-      <label class="grid gap-1.5 text-sm font-medium">제목 <Input bind:value={form.title} maxlength={200} required placeholder="예: 1장 · 항해의 시작" /></label>
-      <label class="grid gap-1.5 text-sm font-medium">구간 종류 <select bind:value={form.kind} class="h-10 rounded-md border bg-background px-3 text-sm">{#each Object.entries(KIND_LABELS) as [value, label]}<option value={value as SectionKind}>{label}</option>{/each}</select></label>
-    </div>
+    <label class="grid gap-1.5 text-sm font-medium">제목 <Input bind:value={form.title} maxlength={200} required placeholder="예: 1장 · 항해의 시작" /></label>
+    <label class="grid gap-1.5 text-sm font-medium">대본 · 대사 · 지문<Textarea bind:value={form.scriptText} rows={9} maxlength={200000} placeholder="배우: 대사를 입력해 주세요.&#10;[무대 지문]&#10;대본이 없어도 악보만 등록할 수 있어요." /></label>
+    <label class="grid gap-1.5 text-sm font-medium">노래 가사<Textarea bind:value={form.lyrics} rows={6} maxlength={200000} placeholder="이 장·막에서 부르는 노래 가사를 입력해 주세요." /></label>
+    <p class="text-xs leading-relaxed text-muted-foreground">쓰는 방법 — 대사: <code>이름: 대사</code> · 지문: <code>[ 지문 ]</code> · 제작진 메모: <code>※ 메모</code>. 한 줄씩 고치려면 위의 ‘줄별 고치기’를 사용해 주세요.</p>
+    <details class="rounded-xl border p-3">
+      <summary class="cursor-pointer text-sm font-medium">고급 설정 · 종류, 시작 시간, 길이, 자료 사용</summary>
+      <div class="mt-3 space-y-4">
+        <label class="grid gap-1.5 text-sm font-medium">구간 종류 <select bind:value={form.kind} class="h-10 rounded-md border bg-background px-3 text-sm">{#each Object.entries(KIND_LABELS) as [value, label]}<option value={value as SectionKind}>{label}</option>{/each}</select></label>
     <label class="grid gap-1.5 text-sm font-medium">상위 장·막
       <select bind:value={form.parentId} disabled={hasChildren || !canEdit || busy} class="h-10 rounded-md border bg-background px-3 text-sm" onchange={() => form.start = ""}>
         <option value="">없음 · 최상위 구간</option>
         {#each sections.filter((s) => !s.parentId && s.id !== section.id) as parent (parent.id)}<option value={parent.id}>{parent.title}</option>{/each}
       </select>
     </label>
-    {#if hasChildren}<p class="text-xs text-muted-foreground">하위 구간이 있는 항목은 최상위로 유지합니다. 구간 명칭은 자유롭게 바꿀 수 있습니다.</p>{/if}
+    {#if hasChildren}<p class="text-xs text-muted-foreground">하위 구간이 있는 항목은 최상위에 그대로 둬요. 구간 이름은 자유롭게 바꿀 수 있어요.</p>{/if}
     <div class="rounded-xl border bg-muted/25 p-3">
       <div class="grid gap-3 sm:grid-cols-2">
-        <label class="grid gap-1.5 text-sm font-medium">시작 위치 (초)<Input bind:value={form.start} inputmode="decimal" placeholder="비워두면 앞 구간에 자동 연결" /></label>
-        <label class="grid gap-1.5 text-sm font-medium">구간 길이 (초)<Input bind:value={form.duration} inputmode="decimal" placeholder="비워두면 자동 계산" /></label>
+        <label class="grid gap-1.5 text-sm font-medium">시작 위치 (초 또는 분:초)<Input bind:value={form.start} placeholder="비워두면 앞 구간에 자동 연결 · 예: 3:30" /></label>
+        <label class="grid gap-1.5 text-sm font-medium">구간 길이 (초 또는 분:초)<Input bind:value={form.duration} placeholder="비워두면 자동 계산 · 예: 3:30 또는 210" /></label>
       </div>
-      <p class="mt-2 text-xs leading-relaxed text-muted-foreground">{form.parentId ? "상위 장·막의 시작을 0초로 계산합니다." : "전체 공연의 시작을 0초로 계산합니다."} 현재 배치: {formatTime(section.timing.startMs)}부터 {formatTime(section.timing.durationMs)} 동안. 빈 구간의 자동 길이는 1분입니다.</p>
+      <p class="mt-2 text-xs leading-relaxed text-muted-foreground">{form.parentId ? "상위 장·막의 시작 시점을 0초로 계산해요." : "전체 공연의 시작 시점을 0초로 계산해요."} 현재 배치: {formatTime(section.timing.startMs)}부터 {formatTime(section.timing.durationMs)} 동안. 빈 구간은 길이를 1분으로 자동 설정해요.</p>
     </div>
-    <label class="grid gap-1.5 text-sm font-medium">대본 · 대사 · 지문<Textarea bind:value={form.scriptText} rows={9} maxlength={200000} placeholder="배우: 대사를 입력하세요.&#10;[무대 지문]&#10;대본이 없어도 악보만 등록할 수 있습니다." /></label>
-    <label class="grid gap-1.5 text-sm font-medium">노래 가사<Textarea bind:value={form.lyrics} rows={6} maxlength={200000} placeholder="이 장·막에서 부르는 노래 가사를 입력하세요." /></label>
     <div class="grid gap-3 sm:grid-cols-3">
       {#each [{ field: "backgroundMode", label: "배경 영상" }, { field: "musicMode", label: "음악" }, { field: "scoreMode", label: "악보" }] as item (item.field)}
         <label class="grid gap-1.5 text-sm font-medium">{item.label}
@@ -61,11 +63,13 @@
         </label>
       {/each}
     </div>
-    <p class="text-xs leading-relaxed text-muted-foreground">상위 자료 사용은 하위 구간에서 적용됩니다. 최상위 구간은 ‘이 구간의 자료 사용’을 선택하세요. ‘사용하지 않음’으로 바꿔도 자료 연결은 보존됩니다.</p>
+    <p class="text-xs leading-relaxed text-muted-foreground">상위 자료는 하위 구간에서 사용할 수 있어요. 최상위 구간은 ‘이 구간의 자료 사용’을 선택해 주세요. ‘사용하지 않음’으로 바꿔도 자료 연결은 보존돼요.</p>
+      </div>
+    </details>
   </fieldset>
   {#if error}<p role="alert" class="text-sm text-destructive">{error}</p>{/if}
   <div class="flex flex-wrap items-center justify-between gap-2 border-t pt-3">
-    <p class="text-xs text-muted-foreground">{canEdit ? dirty ? "저장하지 않은 변경이 있습니다." : "저장된 내용입니다." : "열람 권한으로 보고 있습니다."}</p>
+    <p class="text-xs text-muted-foreground">{canEdit ? dirty ? "저장하지 않은 변경이 있어요." : "저장된 내용이에요." : "열람 전용으로 보고 있어요."}</p>
     {#if canEdit}<Button type="submit" disabled={busy || !dirty}>{busy ? "저장 중…" : "구간 저장"}</Button>{/if}
   </div>
 </form>

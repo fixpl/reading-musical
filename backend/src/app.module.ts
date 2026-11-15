@@ -1,4 +1,8 @@
 import { Module } from "@nestjs/common";
+import { APP_FILTER } from "@nestjs/core";
+import { SiteModule } from "./site/site.module";
+import { ShowcaseModule } from "./showcase/showcase.module";
+import { RecruitmentModule } from "./recruitment/recruitment.module";
 import { ConfigModule } from "@nestjs/config";
 import { AdminModule } from "./admin/admin.module";
 import { AuthModule } from "./auth/auth.module";
@@ -22,6 +26,7 @@ import { ScheduleModule } from "./schedule/schedule.module";
 import { ScriptsModule } from "./scripts/scripts.module";
 import { StageModule } from "./stage/stage.module";
 import { UsersModule } from "./users/users.module";
+import { PrismaExceptionFilter } from "./common/filters/prisma-exception.filter";
 import { validateEnvironment } from "./config/env.validation";
 
 @Module({
@@ -29,6 +34,9 @@ import { validateEnvironment } from "./config/env.validation";
     ConfigModule.forRoot({ isGlobal: true, validate: validateEnvironment }),
     PrismaModule,
     HealthModule,
+    SiteModule,
+    ShowcaseModule,
+    RecruitmentModule,
     AdminModule,
     AuthModule,
     AssetsModule,
@@ -49,6 +57,7 @@ import { validateEnvironment } from "./config/env.validation";
     BoardModule,
     AiModule,
     CueSheetModule
-  ]
+  ],
+  providers: [{ provide: APP_FILTER, useClass: PrismaExceptionFilter }]
 })
 export class AppModule {}

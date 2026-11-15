@@ -130,13 +130,47 @@ test('attachment links preserve signed query strings and do not accept executabl
   for (const url of ['javascript:alert(1)', 'data:text/html,bad', 'file:///tmp/test', '//other.test/file', 'https://user:pass@example.test/file']) assert.throws(() => reference.referenceUrls(url));
 });
 
+const draftSource = ts.transpileModule(fs.readFileSync(path.join(root, 'frontend/src/lib/domain/draft-review.ts'), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } });
+const draftModule = { exports: {} };
+new Function('module', 'exports', draftSource.outputText)(draftModule, draftModule.exports);
+const review = draftModule.exports;
+test('time inputs accept seconds and minutes:seconds', () => {
+  assert.equal(ui.secondsInput('210'), 210000);
+  assert.equal(ui.secondsInput('3:30'), 210000);
+  assert.throws(() => ui.secondsInput('1:75'));
+  assert.equal(ui.secondsInput(''), null);
+});
+test('AI draft review: scene time edits scale movable lines and keep notes tiny', () => {
+  const scene = { title: '넘버 1', summary: null, cues: [], lines: [
+    { kind: '대사', speaker: '엄마', text: 'a', durationMs: 4000 }, { kind: '지문', speaker: null, text: 'b', durationMs: 6000 }, { kind: '메모', speaker: null, text: 'n', durationMs: 1 }] };
+  assert.equal(review.sceneMs(scene), 10001);
+  assert.equal(review.setSceneMs(scene, 20000), 20000);
+  assert.equal(scene.lines[2].durationMs, 1);
+  assert.deepEqual([review.parseMmSs('3:30'), review.parseMmSs('210'), review.parseMmSs('3분 30초'), review.parseMmSs('1:75'), review.parseMmSs('x')], [210000, 210000, 210000, null, null]);
+  assert.equal(review.formatMmSs(210000), '3:30');
+  assert.deepEqual(review.speakers({ acts: [{ title: '막', scenes: [scene] }] }), ['엄마']);
+  assert.equal(review.pruned({ acts: [{ title: '빈 막', scenes: [] }, { title: '막', scenes: [scene] }] }).acts.length, 1);
+});
+
+const matchSource = ts.transpileModule(fs.readFileSync(path.join(root, 'frontend/src/lib/domain/video-match.ts'), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } });
+const matchModule = { exports: {} };
+new Function('module', 'exports', matchSource.outputText)(matchModule, matchModule.exports);
+const match = matchModule.exports;
+test('video file names suggest scenes by number or title word, never the same scene twice', () => {
+  assert.deepEqual([match.fileNumber('#6_car.mp4'), match.fileNumber('3.mov'), match.fileNumber('lay_1.mp4'), match.titleNumber('넘버 11 May It Be')], [6, 3, null, 11]);
+  const scenes = [{ id: 'a', title: '오프닝 찬란한 기억', parentId: null }, { id: 'b', title: '찬란한 기억', parentId: 'a' }, { id: 'c', title: '넘버 1 Lippen', parentId: 'a' }, { id: 'd', title: '넘버 3 Being Alive', parentId: 'a' }];
+  assert.deepEqual(match.suggestScenes(['#1_heart.mp4', '#3.mov', '#3_1.mov', '찬란한 기억 intro.mp4', 'lay_1.mp4'], scenes), ['c', 'd', null, 'b', null]);
+  assert.equal(match.mimeFor({ name: 'x.mov', type: '' }), 'video/quicktime');
+});
+
 const { compile } = require(require.resolve('svelte/compiler', { paths: [path.join(root, 'frontend')] }));
 const newScreens = [
   'frontend/src/lib/components/app/composition-section-form.svelte',
   'frontend/src/lib/components/app/composition-section-list.svelte',
   'frontend/src/lib/components/app/composition-media-links.svelte',
   'frontend/src/lib/components/app/composition-import-form.svelte',
-  'frontend/src/lib/components/app/composition-reading.svelte',
+  'frontend/src/lib/components/app/script-register.svelte',
+  'frontend/src/lib/components/app/composition-video-batch.svelte',
   'frontend/src/lib/components/app/composition-workspace.svelte',
   'frontend/src/lib/components/app/composition-attachments.svelte',
   'frontend/src/lib/components/app/section-reference-viewer.svelte',

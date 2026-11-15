@@ -1,13 +1,15 @@
-import { BadRequestException, ForbiddenException, Injectable } from "@nestjs/common";
+import { BadRequestException, ConflictException, ForbiddenException, Injectable } from "@nestjs/common";
 import { AssetKind, Prisma, ProductionRole } from "@prisma/client";
 import * as bcrypt from "bcryptjs";
 import type { RequestUser } from "../common/types/request-user";
 import { PrismaService } from "../prisma/prisma.service";
+import { SiteService } from "../site/site.service";
+import { addsOptionalProfileData } from "./profile-privacy";
 import { ChangePasswordDto, SearchUsersQueryDto, UpdateProfileDto, UpdateUserSettingsDto } from "./dto";
 
 @Injectable()
 export class UsersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService, private readonly site: SiteService) {}
 
   async search(query: SearchUsersQueryDto, user: RequestUser) {
     const q = query.q?.trim() ?? "";
@@ -77,7 +79,8 @@ export class UsersService {
     }
     if (query.profileType) where.profileType = query.profileType;
     if (query.gender) where.gender = query.gender;
-    if (query.status) where.status = query.status;
+    // 비활성·차단 계정은 멤버 후보에 나오지 않는다(상태를 직접 고른 경우만 예외).
+    where.status = query.status ?? "ACTIVE";
     if (query.profileComplete !== undefined) where.profileComplete = query.profileComplete;
     if (query.region?.trim()) {
       where.address = { contains: query.region.trim(), mode: "insensitive" };
@@ -111,8 +114,9 @@ export class UsersService {
 
     const candidates = await this.prisma.user.findMany({
       where,
+      skip: query.skip ?? 0,
       take: Math.min(take * 5, 200),
-      orderBy: { createdAt: "desc" },
+      orderBy: [{ createdAt: "desc" }, { id: "asc" }],
       select: {
         id: true,
         email: true,
@@ -158,44 +162,35 @@ export class UsersService {
   }
 
   async updateMe(userId: string, dto: UpdateProfileDto) {
-    if (dto.photoAssetId) {
-      await this.assertOwnedProfilePhotoAsset(userId, dto.photoAssetId);
-    }
-
-    const user = await this.prisma.user.update({
-      where: { id: userId },
-      data: {
-        name: dto.name,
-        phone: dto.phone,
-        profileType: dto.profileType,
-        gender: dto.gender,
-        birthDate: dto.birthDate === undefined ? undefined : dto.birthDate ? new Date(dto.birthDate) : null,
-        address: dto.address,
-        profileDetails:
-          dto.profileDetails === undefined
-            ? undefined
-            : dto.profileDetails === null
-              ? Prisma.JsonNull
-              : (dto.profileDetails as Prisma.InputJsonObject),
-        photoAssetId: dto.photoAssetId,
-        profileComplete: dto.phone === undefined ? undefined : Boolean(dto.phone)
-      },
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        phone: true,
-        gender: true,
-        birthDate: true,
-        address: true,
-        profileType: true,
-        profileDetails: true,
-        photoAssetId: true,
-        emailNotify: true,
-        profileComplete: true
+    if (dto.name !== undefined && !dto.name?.trim()) throw new BadRequestException("이름을 입력해 주세요.");
+    if (dto.photoAssetId) await this.assertOwnedProfilePhotoAsset(userId, dto.photoAssetId);
+    return this.prisma.$transaction(async (tx) => {
+      const previous = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: {
+        phone: true, gender: true, birthDate: true, address: true, profileDetails: true, photoAssetId: true, updatedAt: true
+      } });
+      if (addsOptionalProfileData(dto, previous)) {
+        await this.site.recordProfileConsent(userId, dto, "PROFILE_UPDATE", tx);
       }
+      // Empty fields are explicit removal; undefined means leave this field unchanged.
+      // Compare-and-swap also prevents a concurrent edit from restoring removed information.
+      const updated = await tx.user.updateMany({
+        where: { id: userId, updatedAt: previous.updatedAt },
+        data: {
+          name: dto.name?.trim(), phone: dto.phone === undefined ? undefined : dto.phone?.trim() || null,
+          profileType: dto.profileType, gender: dto.gender,
+          birthDate: dto.birthDate === undefined ? undefined : dto.birthDate ? new Date(dto.birthDate) : null,
+          address: dto.address === undefined ? undefined : dto.address?.trim() || null,
+          profileDetails: dto.profileDetails === undefined ? undefined : dto.profileDetails === null ? Prisma.JsonNull : dto.profileDetails as Prisma.InputJsonObject,
+          photoAssetId: dto.photoAssetId,
+          profileComplete: dto.phone === undefined ? undefined : Boolean(dto.phone?.trim())
+        }
+      });
+      if (updated.count !== 1) throw new ConflictException("프로필이 다른 작업에서 변경되었습니다. 최신 내용을 불러온 뒤 다시 저장해 주세요.");
+      return tx.user.findUniqueOrThrow({ where: { id: userId }, select: {
+        id: true, email: true, name: true, phone: true, gender: true, birthDate: true, address: true,
+        profileType: true, profileDetails: true, photoAssetId: true, emailNotify: true, profileComplete: true
+      } });
     });
-    return user;
   }
 
   async updateMySettings(userId: string, dto: UpdateUserSettingsDto) {
@@ -247,6 +242,9 @@ export class UsersService {
     const passwordOk = await bcrypt.compare(dto.currentPassword, user.passwordHash);
     if (!passwordOk) {
       throw new BadRequestException("현재 비밀번호를 확인해 주세요.");
+    }
+    if (dto.currentPassword === dto.newPassword) {
+      throw new BadRequestException("현재 비밀번호와 다른 비밀번호를 입력해 주세요");
     }
 
     await this.prisma.$transaction([

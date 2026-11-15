@@ -79,6 +79,31 @@ enum UserStatus {
   @@map("user_status")
 }
 
+enum RecruitmentRoundStatus {
+  DRAFT
+  OPEN
+  CLOSED
+  CANCELLED
+  @@map("recruitment_round_status")
+}
+
+enum RecruitmentPositionRole {
+  ACTOR
+  STAFF
+  @@map("recruitment_position_role")
+}
+
+enum RecruitmentApplicationStatus {
+  SUBMITTED
+  REVIEWING
+  ON_HOLD
+  APPROVED
+  NOT_SELECTED
+  WITHDRAWN
+  CANCELLED
+  @@map("recruitment_application_status")
+}
+
 enum Phase {
   PLANNING
   READING
@@ -241,11 +266,20 @@ model User {
   failedLoginCount Int @default(0) @map("failed_login_count")
   lockedUntil DateTime? @map("locked_until")
   emailNotify Boolean @default(true) @map("email_notify")
+  // 서비스 알림과 광고 수신 동의는 별개다. 기존 회원의 동의를 추정하지 않는다.
+  marketingPrivacy Boolean @default(false) @map("marketing_privacy")
+  marketingEmail Boolean @default(false) @map("marketing_email")
+  marketingRevision Int @default(0) @map("marketing_revision")
+  marketingUpdatedAt DateTime? @map("marketing_updated_at")
+  consentEvents ConsentEvent[]
+  supportTickets SupportTicket[]
   platformRole PlatformRole @default(MEMBER) @map("platform_role")
   memberships Membership[]
+  recruitmentApplications RecruitmentApplication[]
   availabilities Availability[]
   emailDeliveries EmailDelivery[]
   authSessions AuthSession[]
+  personalRehearsals PersonalRehearsal[]
   assets Asset[]
   handledInquiries Inquiry[] @relation("InquiryHandledBy")
   planningMemos PlanningMemo[]
@@ -259,6 +293,23 @@ model User {
   @@index([status])
   @@index([lockedUntil])
   @@map("users")
+}
+
+model RegistrationEmailChallenge {
+  id String @id @default(uuid())
+  email String
+  codeHash String @map("code_hash")
+  expiresAt DateTime @map("expires_at")
+  attempts Int @default(0)
+  verifiedAt DateTime? @map("verified_at")
+  proofHash String? @unique @map("proof_hash")
+  proofExpiresAt DateTime? @map("proof_expires_at")
+  consumedAt DateTime? @map("consumed_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([email, createdAt])
+  @@index([expiresAt])
+  @@index([createdAt])
+  @@map("registration_email_challenges")
 }
 
 model AuthSession {
@@ -311,7 +362,10 @@ model Production {
   deletedAt DateTime? @map("deleted_at")
   // 장·막 구성의 동시 편집 충돌을 방지하는 낙관적 잠금 버전.
   compositionRevision Int @default(0) @map("composition_revision")
+  showcase ProductionShowcase?
+  recruitmentRounds RecruitmentRound[]
   sections PerformanceSection[]
+  personalRehearsals PersonalRehearsal[]
   positionRequirements PositionRequirement[]
   memberships Membership[]
   scripts Script[]
@@ -352,6 +406,8 @@ model Membership {
   roles MembershipRole[]
   staffAssignments StaffAssignment[]
   castAssignments CastAssignment[]
+  creditConsent PerformanceCreditConsent?
+  recruitmentApplications RecruitmentApplication[]
   attendances Attendance[]
   checklistAssignments ChecklistAssignment[]
   ownedRunSheetItems RunSheetItem[]
@@ -372,6 +428,122 @@ model MembershipRole {
   @@unique([membershipId, role])
   @@index([role])
   @@map("membership_roles")
+}
+
+// 운영용 공개 상태와 관객에게 게시하는 소개를 분리한다. 초안 저장은 공개본을 바꾸지 않는다.
+model ProductionShowcase {
+  id String @id @default(uuid())
+  productionId String @unique @map("production_id")
+  production Production @relation(fields: [productionId], references: [id], onDelete: Cascade)
+  draft Json
+  published Json?
+  publishedAt DateTime? @map("published_at")
+  publishedById String? @map("published_by_id")
+  revision Int @default(1)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@index([publishedAt])
+  @@map("production_showcases")
+}
+
+// 이름과 사진은 공연별로 본인이 동의한다. 사진은 당시 파일과 본문 지문까지 고정한다.
+model PerformanceCreditConsent {
+  id String @id @default(uuid())
+  membershipId String @unique @map("membership_id")
+  membership Membership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+  displayName String @map("display_name")
+  showName Boolean @default(false) @map("show_name")
+  showPhoto Boolean @default(false) @map("show_photo")
+  photoAssetId String? @map("photo_asset_id")
+  photoFingerprint String? @map("photo_fingerprint")
+  noticeVersion String @map("notice_version")
+  consentedAt DateTime? @map("consented_at")
+  revokedAt DateTime? @map("revoked_at")
+  revision Int @default(1)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@map("performance_credit_consents")
+}
+
+// 모집 조건은 게시 후 고정하고, 변경된 모집은 새 회차로 관리한다.
+model RecruitmentRound {
+  id String @id @default(uuid())
+  productionId String @map("production_id")
+  production Production @relation(fields: [productionId], references: [id], onDelete: Cascade)
+  title String
+  summary String
+  description String @db.Text
+  region String
+  activityStartDate DateTime? @db.Date @map("activity_start_date")
+  activityEndDate DateTime? @db.Date @map("activity_end_date")
+  conditions String @db.Text
+  deadlineAt DateTime? @map("deadline_at")
+  status RecruitmentRoundStatus @default(DRAFT)
+  revision Int @default(1)
+  createdById String @map("created_by_id")
+  publishedAt DateTime? @map("published_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  positions RecruitmentPosition[]
+  applications RecruitmentApplication[]
+  @@index([productionId, createdAt])
+  @@index([status, publishedAt])
+  @@map("recruitment_rounds")
+}
+
+model RecruitmentPosition {
+  id String @id @default(uuid())
+  roundId String @map("round_id")
+  round RecruitmentRound @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  role RecruitmentPositionRole
+  label String
+  capacity Int
+  order Int
+  applications RecruitmentApplication[]
+  @@unique([id, roundId])
+  @@index([roundId, order])
+  @@map("recruitment_positions")
+}
+
+// 지원은 내부 자료 접근권을 주지 않는다. 승인 transaction에서만 해당 공연 역할을 추가한다.
+model RecruitmentApplication {
+  id String @id @default(uuid())
+  roundId String @map("round_id")
+  round RecruitmentRound @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  positionId String @map("position_id")
+  position RecruitmentPosition @relation(fields: [positionId, roundId], references: [id, roundId], onDelete: Cascade)
+  userId String @map("user_id")
+  user User @relation(fields: [userId], references: [id])
+  status RecruitmentApplicationStatus @default(SUBMITTED)
+  revision Int @default(1)
+  message String @db.Text
+  availability String @db.Text
+  reviewMessage String? @db.Text @map("review_message")
+  reviewedById String? @map("reviewed_by_id")
+  reviewedAt DateTime? @map("reviewed_at")
+  membershipId String? @map("membership_id")
+  membership Membership? @relation(fields: [membershipId], references: [id], onDelete: SetNull)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  events RecruitmentApplicationEvent[]
+  @@unique([roundId, userId])
+  @@index([userId, updatedAt])
+  @@index([positionId, status])
+  @@map("recruitment_applications")
+}
+
+model RecruitmentApplicationEvent {
+  id String @id @default(uuid())
+  applicationId String @map("application_id")
+  application RecruitmentApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  fromStatus RecruitmentApplicationStatus? @map("from_status")
+  toStatus RecruitmentApplicationStatus @map("to_status")
+  actorId String @map("actor_id")
+  message String? @db.Text
+  revision Int
+  createdAt DateTime @default(now()) @map("created_at")
+  @@unique([applicationId, revision])
+  @@map("recruitment_application_events")
 }
 
 model StaffAssignment {
@@ -1010,6 +1182,15 @@ enum InquiryStatus {
 
 model Inquiry {
   id String @id @default(uuid())
+  revision Int @default(1)
+  source Json?
+  productionSnapshot Json? @map("production_snapshot")
+  messages InquiryMessage[]
+  accessGrants InquiryAccess[]
+  // 기존 문의에는 동의를 소급 생성하지 않는다.
+  privacyDocumentId String? @map("privacy_document_id")
+  privacyDocument LegalDocument? @relation(fields: [privacyDocumentId], references: [id])
+  privacyConsentedAt DateTime? @map("privacy_consented_at")
   orgName String @map("org_name")
   contactName String @map("contact_name")
   email String
@@ -1032,6 +1213,60 @@ model Inquiry {
   @@index([status, createdAt])
   @@index([createdAt])
   @@map("inquiries")
+}
+
+// 고객의 신청과 공개 답변은 내부 공연 작업 자료와 분리한다.
+model InquiryMessage {
+  id String @id @default(uuid())
+  inquiryId String @map("inquiry_id")
+  inquiry Inquiry @relation(fields: [inquiryId], references: [id], onDelete: Cascade)
+  authorKind String @map("author_kind")
+  authorId String? @map("author_id")
+  body String @db.Text
+  public Boolean @default(false)
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([inquiryId, createdAt])
+  @@map("inquiry_messages")
+}
+
+// 인증번호와 조회 세션의 원문은 저장하지 않는다.
+model InquiryAccess {
+  id String @id @default(uuid())
+  inquiryId String @map("inquiry_id")
+  inquiry Inquiry @relation(fields: [inquiryId], references: [id], onDelete: Cascade)
+  email String
+  codeHash String @map("code_hash")
+  attempts Int @default(0)
+  expiresAt DateTime @map("expires_at")
+  consumedAt DateTime? @map("consumed_at")
+  sessionHash String? @unique @map("session_hash")
+  sessionExpiresAt DateTime? @map("session_expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([inquiryId, createdAt])
+  @@index([expiresAt])
+  @@map("inquiry_accesses")
+}
+
+// DB 삭제와 외부 저장소 삭제를 분리하는 영구적인 재시도 기록. 공연 FK를 갖지 않는다.
+model ProductionPurge {
+  id String @id @default(uuid())
+  productionId String @unique @map("production_id")
+  title String
+  actorId String @map("actor_id")
+  reason String
+  state String @default("FILES_PENDING")
+  assets Json
+  storageIdentity String @map("storage_identity")
+  notBefore DateTime @map("not_before")
+  attempts Int @default(0)
+  leaseToken String? @map("lease_token")
+  leaseUntil DateTime? @map("lease_until")
+  errorCode String? @map("error_code")
+  completedAt DateTime? @map("completed_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@index([state, notBefore])
+  @@map("production_purges")
 }
 
 model PlanningMemo {
@@ -1068,11 +1303,21 @@ model BoardPost {
   title String
   body String @db.Text
   pinned Boolean @default(false)
+  channel String @default("GENERAL")
+  visibility String @default("TEAM")
+  status String @default("OPEN")
+  source String?
+  unitKey String? @map("unit_key")
+  positionMs Int? @map("position_ms")
+  contextLabel String? @map("context_label")
+  revision Int @default(1)
   comments BoardComment[]
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@index([productionId, pinned, createdAt])
+  @@index([productionId, visibility, channel, createdAt])
+  @@index([productionId, source, positionMs])
   @@map("board_posts")
 }
 
@@ -1200,3 +1445,112 @@ model PerformanceMedia {
   @@map("performance_media")
 }
 
+// 개인 연습 기록은 공연·사용자·연습 대본별로 분리한다. 공유 리딩 세션의 시계를 변경하지 않는다.
+// 공개한 문서는 수정·삭제하지 않고 새 버전을 발행한다.
+model LegalDocument {
+  id String @id @default(uuid())
+  kind String
+  version Int
+  title String
+  body String @db.Text
+  purpose String @default("") @db.Text
+  items String @default("") @db.Text
+  retention String @default("") @db.Text
+  refusal String @default("") @db.Text
+  effectiveAt DateTime @map("effective_at")
+  publishedAt DateTime? @map("published_at")
+  createdById String @map("created_by_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  consentEvents ConsentEvent[]
+  supportTickets SupportTicket[]
+  inquiries Inquiry[]
+  @@unique([kind, version])
+  @@index([kind, effectiveAt, publishedAt])
+  @@map("legal_documents")
+}
+
+model ConsentEvent {
+  id String @id @default(uuid())
+  userId String @map("user_id")
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind String
+  granted Boolean
+  documentId String? @map("document_id")
+  document LegalDocument? @relation(fields: [documentId], references: [id], onDelete: Restrict)
+  source String
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([userId, createdAt])
+  @@map("consent_events")
+}
+
+model FaqCategory {
+  id String @id @default(uuid())
+  name String @unique
+  order Int @default(0)
+  active Boolean @default(true)
+  revision Int @default(1)
+  questions FaqQuestion[]
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@map("faq_categories")
+}
+
+model FaqQuestion {
+  id String @id @default(uuid())
+  categoryId String @map("category_id")
+  category FaqCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  title String
+  body String @db.Text
+  order Int @default(0)
+  active Boolean @default(true)
+  revision Int @default(1)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@index([categoryId, active, order])
+  @@map("faq_questions")
+}
+
+model SupportTicket {
+  id String @id @default(uuid())
+  userId String? @map("user_id")
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+  // 비회원 조회 키 원문은 저장하거나 URL에 넣지 않는다.
+  guestKeyHash String? @map("guest_key_hash")
+  contactName String @map("contact_name")
+  email String
+  category String
+  subject String
+  message String @db.Text
+  answer String? @db.Text
+  internalNote String? @db.Text @map("internal_note")
+  status String @default("OPEN")
+  revision Int @default(1)
+  privacyDocumentId String @map("privacy_document_id")
+  privacyDocument LegalDocument @relation(fields: [privacyDocumentId], references: [id], onDelete: Restrict)
+  privacyConsentedAt DateTime @default(now()) @map("privacy_consented_at")
+  answeredAt DateTime? @map("answered_at")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+  @@index([expiresAt])
+  @@map("support_tickets")
+}
+
+model PersonalRehearsal {
+  id String @id @default(uuid())
+  userId String @map("user_id")
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  productionId String @map("production_id")
+  production Production @relation(fields: [productionId], references: [id], onDelete: Cascade)
+  source String
+  positionMs Int @default(0) @map("position_ms")
+  completedKeys String[] @default([]) @map("completed_keys")
+  notes Json @default("{}")
+  revision Int @default(0)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+  @@unique([userId, productionId, source])
+  @@index([productionId])
+  @@map("personal_rehearsals")
+}

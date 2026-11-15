@@ -1,4 +1,5 @@
-import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { createHash } from "node:crypto";
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { AttendanceStatus, EventType, Prisma, ProductionRole, StaffDiscipline } from "@prisma/client";
 import type { RequestUser } from "../common/types/request-user";
 import { PrismaService } from "../prisma/prisma.service";
@@ -16,8 +17,8 @@ import { isProductionAdmin } from "../common/access/is-production-admin";
 import { assertProductionMembership } from "../common/access/assert-production-membership";
 import { MEMBERSHIP_BASE_INCLUDE } from "../common/prisma-includes/membership.include";
 import { escapeIcsText, foldIcsLines, formatIcsDate } from "./schedule-ics.util";
-import { ScheduleNotificationsService } from "./schedule-notifications.service";
-import { attendanceStatusLabel, toJson } from "./schedule-shared.util";
+import { ScheduleNotificationsService, type ScheduleEventForNotification } from "./schedule-notifications.service";
+import { attendanceStatusLabel, EVENT_TYPE_LABELS, toJson } from "./schedule-shared.util";
 
 const VIEW_ROLES: ProductionRole[] = [
   ProductionRole.PRODUCER,
@@ -31,6 +32,8 @@ const VIEW_ROLES: ProductionRole[] = [
 
 const FULL_EDIT_ROLES: ProductionRole[] = [ProductionRole.PRODUCER, ProductionRole.DIRECTOR, ProductionRole.STAGE_MANAGER];
 const EDIT_ROLES: ProductionRole[] = [...FULL_EDIT_ROLES, ProductionRole.MUSIC_DIRECTOR];
+const RECONFIRM_STATUSES: AttendanceStatus[] = [AttendanceStatus.ACCEPTED, AttendanceStatus.TENTATIVE];
+const CONFIRMED_SCHEDULE_ACTION = "schedule.assistant_time_changed";
 // 일정 "등록"은 배우·스태프도 가능 — 공연 멤버 전원과 공유되는 스케줄을 만들 수 있다.
 const CREATE_ROLES: ProductionRole[] = [...EDIT_ROLES, ProductionRole.ACTOR, ProductionRole.STAFF];
 const STAGE_NOTE_STAFF_DISCIPLINES: StaffDiscipline[] = [
@@ -42,6 +45,7 @@ const STAGE_NOTE_STAFF_DISCIPLINES: StaffDiscipline[] = [
 ];
 
 type TimeRange = { startAt: Date; endAt: Date };
+type ScheduleConfirmation = { eventVersion: string; auditId: string };
 export type ConflictItem = {
   membershipId: string;
   userId: string;
@@ -61,6 +65,8 @@ type StageSceneNoteForSchedule = Prisma.StageSceneNoteGetPayload<{
 
 @Injectable()
 export class ScheduleService {
+  private readonly logger = new Logger(ScheduleService.name);
+
   constructor(
     @Inject(PrismaService)
     private readonly prisma: PrismaService,
@@ -170,44 +176,16 @@ export class ScheduleService {
       },
       include: this.eventInclude()
     });
-    if (dto.notifyMembers !== false) {
-      await this.scheduleNotifications.createScheduleEventNotifications(event, user, "created", event.type === EventType.READING);
-    }
-    await this.scheduleNotifications.handleForcedAttendances({
-      productionId,
-      eventId: event.id,
-      eventTitle: event.title,
-      actor: user,
-      attendances: event.attendances,
-      conflicts,
-      reason: dto.overrideReason?.trim() || ""
-    });
-    return event;
+    return this.withScheduleNotices(event, user, "created", dto.notifyMembers !== false, conflicts, dto.overrideReason);
   }
 
-  async updateEvent(productionId: string, eventId: string, dto: UpdateScheduleEventDto, user: RequestUser) {
-    const event = await this.assertEvent(productionId, eventId);
-    const eventType = this.resolveEventType(dto.type, dto.eventType, event.type);
-    // Check the existing event too: changing its type must not grant edit access.
-    await this.assertEditPermission(productionId, user, event.type);
-    if (eventType !== event.type) await this.assertEditPermission(productionId, user, eventType);
-    const range =
-      dto.startAt || dto.endAt
-        ? this.parseRange(dto.startAt ?? event.startAt.toISOString(), dto.endAt ?? event.endAt.toISOString())
-        : { startAt: event.startAt, endAt: event.endAt };
-    const sceneIds = dto.sceneIds;
-    const musicCueIds = dto.musicCueIds;
-    const attendeeMembershipIds = dto.attendeeMembershipIds;
-    await Promise.all([
-      sceneIds ? this.assertScenes(productionId, sceneIds) : Promise.resolve(),
-      musicCueIds ? this.assertMusicCues(productionId, musicCueIds) : Promise.resolve(),
-      attendeeMembershipIds ? this.assertMembershipIds(productionId, attendeeMembershipIds) : Promise.resolve()
-    ]);
-    const targetAttendanceIds = attendeeMembershipIds ?? event.attendances.map((attendance) => attendance.membershipId);
-    const conflicts = await this.findConflicts(productionId, targetAttendanceIds, range, eventId);
-    this.assertNoConflictsWithoutOverride(conflicts, dto.overrideReason);
-
-    const updated = await this.prisma.$transaction(async (tx) => {
+  async updateEvent(productionId: string, eventId: string, dto: UpdateScheduleEventDto, user: RequestUser, confirmation?: ScheduleConfirmation) {
+    const plan = confirmation ? undefined : await this.prepareEventUpdate(productionId, eventId, dto, user);
+    const { sceneIds, musicCueIds, attendeeMembershipIds } = dto;
+    const options = confirmation ? { timeout: 20000, isolationLevel: Prisma.TransactionIsolationLevel.Serializable } : { timeout: 20000 };
+    const { updated, conflicts, timeChanged, reconfirmUserIds } = await this.prisma.$transaction(async (tx) => {
+      const { event, eventType, editsTime, range, timeChanged, checkConflicts, conflicts } = plan ??
+        await this.prepareEventUpdate(productionId, eventId, dto, user, tx, confirmation);
       if (sceneIds) {
         await tx.eventScene.deleteMany({ where: { eventId } });
         if (sceneIds.length) {
@@ -227,8 +205,10 @@ export class ScheduleService {
           await tx.attendance.upsert({
             where: { eventId_membershipId: { eventId, membershipId } },
             update: {
-              forced: hasConflict,
-              forcedReason: hasConflict ? dto.overrideReason?.trim() || null : null
+              ...(checkConflicts ? {
+                forced: hasConflict,
+                forcedReason: hasConflict ? dto.overrideReason?.trim() || null : null
+              } : {})
             },
             create: {
               eventId,
@@ -240,8 +220,6 @@ export class ScheduleService {
           });
         }
       } else {
-        const timeChanged =
-          range.startAt.getTime() !== event.startAt.getTime() || range.endAt.getTime() !== event.endAt.getTime();
         if (timeChanged) {
           // 시간이 바뀌어 충돌이 해소된 참석자의 강제 배정 표시를 정리한다.
           const conflictedIds = [...new Set(conflicts.map((conflict) => conflict.membershipId))];
@@ -259,35 +237,45 @@ export class ScheduleService {
           }
         }
       }
+      if (timeChanged) {
+        // 기존 참석 의사는 이전 시간에 대한 응답이므로 변경된 시간에 다시 확인한다.
+        const reset = await tx.attendance.updateMany({
+          where: { eventId, status: { in: RECONFIRM_STATUSES } },
+          data: { status: AttendanceStatus.INVITED }
+        });
+        if (confirmation) {
+          await tx.activityLog.create({ data: {
+            id: confirmation.auditId, productionId, organizationId: event.production.organizationId, actorId: user.id,
+            action: CONFIRMED_SCHEDULE_ACTION, entity: "ScheduleEvent", entityId: eventId,
+            beforeJson: { startAt: event.startAt.toISOString(), endAt: event.endAt.toISOString() },
+            afterJson: { startAt: range.startAt.toISOString(), endAt: range.endAt.toISOString(), attendanceReset: reset.count }
+          } });
+        }
+      }
 
-      return tx.scheduleEvent.update({
+      const updated = await tx.scheduleEvent.update({
         where: { id: eventId },
         data: {
-          type: eventType,
+          type: dto.type || dto.eventType ? eventType : undefined,
           title: dto.title?.trim(),
-          startAt: range.startAt,
-          endAt: range.endAt,
+          startAt: editsTime ? range.startAt : undefined,
+          endAt: editsTime ? range.endAt : undefined,
           location: dto.location === undefined && dto.venue === undefined ? undefined : dto.location?.trim() || dto.venue?.trim() || null,
           meetingUrl: dto.meetingUrl === undefined ? undefined : dto.meetingUrl?.trim() || null
         },
         include: this.eventInclude()
       });
+      const reconfirmUserIds = confirmation ? new Set(event.attendances
+        .filter(({ status }) => RECONFIRM_STATUSES.includes(status))
+        .map(({ membership }) => membership.user.id)) : undefined;
+      return { updated, conflicts, timeChanged, reconfirmUserIds };
+    }, options).catch((error: unknown) => {
+      if (confirmation && error instanceof Prisma.PrismaClientKnownRequestError && (error.code === "P2034" || error.code === "P2002")) {
+        throw this.changedSchedulePreview();
+      }
+      throw error;
     });
-    if (dto.notifyMembers !== false) {
-      await this.scheduleNotifications.createScheduleEventNotifications(updated, user, "updated", true);
-    }
-    if (conflicts.length && dto.overrideReason?.trim()) {
-      await this.scheduleNotifications.handleForcedAttendances({
-        productionId,
-        eventId: updated.id,
-        eventTitle: updated.title,
-        actor: user,
-        attendances: updated.attendances,
-        conflicts,
-        reason: dto.overrideReason.trim()
-      });
-    }
-    return updated;
+    return this.withScheduleNotices(updated, user, "updated", dto.notifyMembers !== false, conflicts, dto.overrideReason, timeChanged, reconfirmUserIds);
   }
 
   async deleteEvent(productionId: string, eventId: string, force: boolean, dto: DeleteScheduleEventDto, user: RequestUser) {
@@ -370,7 +358,7 @@ export class ScheduleService {
     await this.assertScenes(productionId, dto.sceneIds);
     await this.prisma.$transaction([
       this.prisma.eventScene.deleteMany({ where: { eventId } }),
-      ...dto.sceneIds.map((sceneId) => this.prisma.eventScene.create({ data: { eventId, sceneId } }))
+      this.prisma.eventScene.createMany({ data: dto.sceneIds.map((sceneId) => ({ eventId, sceneId })), skipDuplicates: true })
     ]);
     return this.assertEvent(productionId, eventId);
   }
@@ -381,7 +369,7 @@ export class ScheduleService {
     await this.assertMusicCues(productionId, dto.musicCueIds);
     await this.prisma.$transaction([
       this.prisma.eventMusicCue.deleteMany({ where: { eventId } }),
-      ...dto.musicCueIds.map((cueId) => this.prisma.eventMusicCue.create({ data: { eventId, cueId } }))
+      this.prisma.eventMusicCue.createMany({ data: dto.musicCueIds.map((cueId) => ({ eventId, cueId })), skipDuplicates: true })
     ]);
     return this.assertEvent(productionId, eventId);
   }
@@ -412,28 +400,31 @@ export class ScheduleService {
     }, eventId);
     this.assertNoConflictsWithoutOverride(conflicts, dto.overrideReason);
 
-    const results = [];
-    for (const entry of entries) {
-      const hasConflict = conflicts.some((conflict) => conflict.membershipId === entry.membershipId);
-      results.push(
-        await this.prisma.attendance.upsert({
-          where: { eventId_membershipId: { eventId, membershipId: entry.membershipId } },
-          update: {
-            status: entry.status ?? dto.status ?? AttendanceStatus.INVITED,
-            forced: hasConflict,
-            forcedReason: hasConflict ? dto.overrideReason?.trim() || null : null
-          },
-          create: {
-            eventId,
-            membershipId: entry.membershipId,
-            status: entry.status ?? dto.status ?? AttendanceStatus.INVITED,
-            forced: hasConflict,
-            forcedReason: hasConflict ? dto.overrideReason?.trim() || null : null
-          },
-          include: this.attendanceInclude()
-        })
-      );
-    }
+    const results = await this.prisma.$transaction(async (tx) => {
+      const saved = [];
+      for (const entry of entries) {
+        const hasConflict = conflicts.some((conflict) => conflict.membershipId === entry.membershipId);
+        saved.push(
+          await tx.attendance.upsert({
+            where: { eventId_membershipId: { eventId, membershipId: entry.membershipId } },
+            update: {
+              status: entry.status ?? dto.status,
+              forced: hasConflict,
+              forcedReason: hasConflict ? dto.overrideReason?.trim() || null : null
+            },
+            create: {
+              eventId,
+              membershipId: entry.membershipId,
+              status: entry.status ?? dto.status ?? AttendanceStatus.INVITED,
+              forced: hasConflict,
+              forcedReason: hasConflict ? dto.overrideReason?.trim() || null : null
+            },
+            include: this.attendanceInclude()
+          })
+        );
+      }
+      return saved;
+    }, { timeout: 20000 });
     await this.scheduleNotifications.handleForcedAttendances({
       productionId,
       eventId: event.id,
@@ -447,7 +438,7 @@ export class ScheduleService {
   }
 
   async suggest(productionId: string, user: RequestUser, query: { sceneIds?: string; musicCueIds?: string; startAt?: string; endAt?: string }) {
-    await this.assertMembership(productionId, user, VIEW_ROLES);
+    await this.assertMembership(productionId, user, CREATE_ROLES);
     const sceneIds = this.splitIds(query.sceneIds);
     const musicCueIds = this.splitIds(query.musicCueIds);
     await Promise.all([this.assertScenes(productionId, sceneIds), this.assertMusicCues(productionId, musicCueIds)]);
@@ -518,7 +509,7 @@ export class ScheduleService {
   async getMySchedule(user: RequestUser) {
     const [attendances, availabilities] = await Promise.all([
       this.prisma.attendance.findMany({
-        where: { membership: { userId: user.id } },
+        where: { membership: { userId: user.id }, event: { production: { deletedAt: null } } },
         orderBy: { event: { startAt: "asc" } },
         include: {
           event: { include: this.eventInclude() },
@@ -542,7 +533,7 @@ export class ScheduleService {
   async exportMyScheduleIcs(user: RequestUser) {
     const [attendances, personalSchedules] = await Promise.all([
       this.prisma.attendance.findMany({
-        where: { membership: { userId: user.id } },
+        where: { membership: { userId: user.id }, event: { production: { deletedAt: null } } },
         orderBy: { event: { startAt: "asc" } },
         include: {
           event: { include: { production: { select: { id: true, title: true } } } },
@@ -561,7 +552,7 @@ export class ScheduleService {
       "PRODID:-//Reading Musical//Personal Schedule//KO",
       "CALSCALE:GREGORIAN",
       "METHOD:PUBLISH",
-      "X-WR-CALNAME:Reading Musical 내 스케줄",
+      "X-WR-CALNAME:아트브릿지 내 일정",
       "X-WR-TIMEZONE:Asia/Seoul"
     ];
 
@@ -570,7 +561,7 @@ export class ScheduleService {
       const productionTitle = event.production?.title ?? "아트브릿지";
       const description = [
         `공연: ${productionTitle}`,
-        `일정 유형: ${event.type}`,
+        `일정 유형: ${EVENT_TYPE_LABELS[event.type]}`,
         `출석 상태: ${attendanceStatusLabel(attendance.status)}`,
         attendance.forced ? `강제 배정: ${attendance.forcedReason || "사유 없음"}` : null,
         event.meetingUrl ? `회의 링크: ${event.meetingUrl}` : null
@@ -724,22 +715,26 @@ export class ScheduleService {
   }
 
   private splitIds(value?: string) {
-    return (value ?? "")
+    const ids = (value ?? "")
       .split(",")
       .map((item) => item.trim())
       .filter(Boolean);
+    if (ids.length > 200) {
+      throw new BadRequestException("한 번에 조회할 수 있는 항목은 최대 200개예요");
+    }
+    return ids;
   }
 
-  private async findConflicts(productionId: string, membershipIds: string[], range: TimeRange, ignoreEventId?: string): Promise<ConflictItem[]> {
+  private async findConflicts(productionId: string, membershipIds: string[], range: TimeRange, ignoreEventId?: string, db: Prisma.TransactionClient = this.prisma): Promise<ConflictItem[]> {
     const uniqueMembershipIds = [...new Set(membershipIds)];
     if (!uniqueMembershipIds.length) return [];
-    const memberships = await this.prisma.membership.findMany({
+    const memberships = await db.membership.findMany({
       where: { id: { in: uniqueMembershipIds }, productionId },
       include: { user: { select: { id: true, name: true } } }
     });
     const userIds = memberships.map((membership) => membership.userId);
     const [blockedAvailabilities, overlappingAttendances] = await Promise.all([
-      this.prisma.availability.findMany({
+      db.availability.findMany({
         where: {
           userId: { in: userIds },
           isAvailable: false,
@@ -747,7 +742,7 @@ export class ScheduleService {
           endAt: { gt: range.startAt }
         }
       }),
-      this.prisma.attendance.findMany({
+      db.attendance.findMany({
         where: {
           // Membership IDs differ by production. Match the person across productions.
           membership: { userId: { in: userIds } },
@@ -829,9 +824,9 @@ export class ScheduleService {
     return this.prisma.membership.findUnique({ where: { userId_productionId: { userId, productionId } } });
   }
 
-  private async assertEvent(productionId: string, eventId: string) {
-    const event = await this.prisma.scheduleEvent.findFirst({
-      where: { id: eventId, productionId },
+  private async assertEvent(productionId: string, eventId: string, db: Prisma.TransactionClient = this.prisma, activeOnly = false) {
+    const event = await db.scheduleEvent.findFirst({
+      where: { id: eventId, productionId, ...(activeOnly ? { production: { archived: false, deletedAt: null } } : {}) },
       include: this.eventInclude()
     });
     if (!event) {
@@ -843,7 +838,7 @@ export class ScheduleService {
   private async assertScenes(productionId: string, sceneIds: string[]) {
     const uniqueIds = [...new Set(sceneIds)];
     if (!uniqueIds.length) return;
-    const count = await this.prisma.scene.count({ where: { id: { in: uniqueIds }, act: { script: { productionId } } } });
+    const count = await this.prisma.scene.count({ where: { id: { in: uniqueIds }, act: { script: { productionId, deletedAt: null } } } });
     if (count !== uniqueIds.length) {
       throw new BadRequestException("이 공연에 속하지 않는 장면이 포함되어 있어요");
     }
@@ -908,7 +903,7 @@ export class ScheduleService {
 
   private getProductionScenes(productionId: string) {
     return this.prisma.scene.findMany({
-      where: { act: { script: { productionId } } },
+      where: { act: { script: { productionId, deletedAt: null } } },
       orderBy: [{ act: { order: "asc" } }, { order: "asc" }],
       include: { act: { select: { id: true, title: true, order: true, script: { select: { id: true, title: true } } } } }
     });
@@ -1011,5 +1006,118 @@ export class ScheduleService {
       production: { select: { id: true, title: true } },
       castAssignments: { include: { role: { select: { id: true, name: true } } } }
     } satisfies Prisma.MembershipInclude;
+  }
+
+  private async withScheduleNotices<T extends ScheduleEventForNotification>(
+    event: T,
+    user: RequestUser,
+    kind: "created" | "updated",
+    notifyMembers: boolean,
+    conflicts: ConflictItem[],
+    overrideReason?: string | null,
+    timeChanged = false,
+    reconfirmUserIds?: ReadonlySet<string>
+  ) {
+    const reason = overrideReason?.trim();
+    const notices = await Promise.allSettled([
+      notifyMembers
+        ? this.scheduleNotifications.createScheduleEventNotifications(event, user, kind, kind === "updated" || event.type === EventType.READING, undefined, timeChanged,
+            ...(reconfirmUserIds ? [reconfirmUserIds] as const : []))
+        : undefined,
+      conflicts.length && reason ? this.scheduleNotifications.handleForcedAttendances({
+        productionId: event.productionId,
+        eventId: event.id,
+        eventTitle: event.title,
+        actor: user,
+        attendances: event.attendances,
+        conflicts,
+        reason
+      }) : undefined
+    ]);
+    if (notices.some((notice) => notice.status === "rejected")) {
+      this.logger.warn(`일정 ${event.id}을 저장했지만 알림 준비를 완료하지 못했어요.`);
+      return { ...event, notificationWarning: true };
+    }
+    return event;
+  }
+
+  private async prepareEventUpdate(
+    productionId: string, eventId: string, dto: UpdateScheduleEventDto, user: RequestUser,
+    tx?: Prisma.TransactionClient, confirmation?: ScheduleConfirmation
+  ) {
+    const event = tx ? await this.assertEvent(productionId, eventId, tx, true) : await this.assertEvent(productionId, eventId);
+    const eventType = this.resolveEventType(dto.type, dto.eventType, event.type);
+    // Check the existing event too: changing its type must not grant edit access.
+    await this.assertEditPermission(productionId, user, event.type);
+    if (eventType !== event.type) await this.assertEditPermission(productionId, user, eventType);
+    if (confirmation && this.timeChangeVersion(event) !== confirmation.eventVersion) throw this.changedSchedulePreview();
+    const editsTime = Boolean(dto.startAt || dto.endAt);
+    const range =
+      editsTime
+        ? this.parseRange(dto.startAt ?? event.startAt.toISOString(), dto.endAt ?? event.endAt.toISOString())
+        : { startAt: event.startAt, endAt: event.endAt };
+    const sceneIds = dto.sceneIds;
+    const musicCueIds = dto.musicCueIds;
+    const attendeeMembershipIds = dto.attendeeMembershipIds;
+    await Promise.all([
+      sceneIds ? this.assertScenes(productionId, sceneIds) : Promise.resolve(),
+      musicCueIds ? this.assertMusicCues(productionId, musicCueIds) : Promise.resolve(),
+      attendeeMembershipIds ? this.assertMembershipIds(productionId, attendeeMembershipIds) : Promise.resolve()
+    ]);
+    const targetAttendanceIds = attendeeMembershipIds ?? event.attendances.map((attendance) => attendance.membershipId);
+    const timeChanged =
+      range.startAt.getTime() !== event.startAt.getTime() || range.endAt.getTime() !== event.endAt.getTime();
+    const currentAttendanceIds = new Set(event.attendances.map((attendance) => attendance.membershipId));
+    const attendeesChanged = attendeeMembershipIds !== undefined &&
+      (attendeeMembershipIds.length !== currentAttendanceIds.size || attendeeMembershipIds.some((id) => !currentAttendanceIds.has(id)));
+    const checkConflicts = timeChanged || attendeesChanged;
+    const conflicts = checkConflicts ? (tx
+      ? await this.findConflicts(productionId, targetAttendanceIds, range, eventId, tx)
+      : await this.findConflicts(productionId, targetAttendanceIds, range, eventId)) : [];
+    if (checkConflicts) this.assertNoConflictsWithoutOverride(conflicts, dto.overrideReason, !confirmation);
+    return { event, eventType, editsTime, range, timeChanged, checkConflicts, conflicts };
+  }
+
+  async wasAssistantTimeChangeSaved(auditId: string, eventId: string, user: RequestUser) {
+    return Boolean(await this.prisma.activityLog.findFirst({
+      where: { id: auditId, entityId: eventId, actorId: user.id, action: CONFIRMED_SCHEDULE_ACTION },
+      select: { id: true }
+    }));
+  }
+
+  private changedSchedulePreview() {
+    return new ConflictException({ code: "SCHEDULE_PREVIEW_CHANGED", message: "미리보기 이후 일정이나 참석 응답이 바뀌었어요. 최신 내용으로 다시 확인해 주세요." });
+  }
+
+  private timeChangeVersion(event: Awaited<ReturnType<ScheduleService["assertEvent"]>>) {
+    const attendance = event.attendances.map(({ id, status, membership }) => JSON.stringify([id, status, membership.user.name])).sort();
+    return createHash("sha256").update(JSON.stringify([
+      event.id, event.title, event.type, event.production.title, event.startAt, event.endAt, attendance
+    ])).digest("hex");
+  }
+
+  async previewTimeChange(productionId: string, eventId: string, startAt: string, endAt: string, user: RequestUser) {
+    const event = await this.assertEvent(productionId, eventId, this.prisma, true);
+    await this.assertEditPermission(productionId, user, event.type);
+    const before = { startAt: event.startAt, endAt: event.endAt };
+    // Preserve the stored duration when the operator only moves the start.
+    const newStart = this.parseOptionalDate(startAt, "startAt") ?? event.startAt;
+    const movedEnd = startAt && !endAt
+      ? new Date(+newStart + (+event.endAt - +event.startAt)).toISOString()
+      : event.endAt.toISOString();
+    const after = this.parseRange(newStart.toISOString(), endAt || movedEnd);
+    const timeChanged = +before.startAt !== +after.startAt || +before.endAt !== +after.endAt;
+    const attendanceIds = event.attendances.map((attendance) => attendance.membershipId);
+    const conflicts = timeChanged ? await this.findConflicts(productionId, attendanceIds, after, eventId) : [];
+    return {
+      event: { id: event.id, title: event.title, productionId, productionTitle: event.production.title, ...before },
+      before,
+      after,
+      timeChanged,
+      eventVersion: this.timeChangeVersion(event),
+      reconfirm: timeChanged ? event.attendances.filter(({ status }) => RECONFIRM_STATUSES.includes(status))
+        .map(({ id, membership, status }) => ({ id, name: membership.user.name, status })) : [],
+      conflicts: conflicts.map(({ userName, reason, startAt, endAt }) => ({ userName, reason, startAt, endAt }))
+    };
   }
 }

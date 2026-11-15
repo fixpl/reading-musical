@@ -5,7 +5,7 @@ import { MailService } from "../mail/mail.service";
 import { NotificationsService } from "../notifications/notifications.service";
 import { PrismaService } from "../prisma/prisma.service";
 import type { ConflictItem } from "./schedule.service";
-import { attendanceStatusLabel, clampedReminderHours, formatKoreanDateTime, toJson } from "./schedule-shared.util";
+import { attendanceStatusLabel, clampedReminderHours, EVENT_TYPE_LABELS, formatKoreanDateTime, toJson } from "./schedule-shared.util";
 
 export type ScheduleNotificationKind = "created" | "updated" | "canceled";
 
@@ -65,6 +65,7 @@ export class ScheduleNotificationsService {
       where: {
         status: { in: [AttendanceStatus.INVITED, AttendanceStatus.TENTATIVE] },
         event: {
+          production: { deletedAt: null },
           startAt: { gt: now, lte: windowEnd }
         }
       },
@@ -123,7 +124,9 @@ export class ScheduleNotificationsService {
     actor: RequestUser,
     kind: ScheduleNotificationKind,
     sendEmail: boolean,
-    reason?: string
+    reason?: string,
+    attendanceReset = false,
+    reconfirmUserIds?: ReadonlySet<string>
   ) {
     const recipients = this.scheduleNotificationRecipients(event, actor.id);
     if (!recipients.length) {
@@ -131,13 +134,13 @@ export class ScheduleNotificationsService {
     }
 
     const type = `schedule.event_${kind}`;
-    const payload = this.scheduleNotificationPayload(event, actor, kind, reason);
+    const shouldReconfirm = (userId: string) => attendanceReset && (reconfirmUserIds?.has(userId) ?? true);
     await this.notifications.createNotifications(
       recipients.map((recipient) => ({
         productionId: event.productionId,
         userId: recipient.userId,
         type,
-        payload
+        payload: this.scheduleNotificationPayload(event, actor, kind, reason, shouldReconfirm(recipient.userId))
       }))
     );
 
@@ -153,7 +156,7 @@ export class ScheduleNotificationsService {
           toEmail: recipient.email,
           subject: this.scheduleEmailSubject(event, kind),
           templateKey: this.scheduleEmailTemplateKey(event, kind),
-          bodyText: this.scheduleEmailBody(event, actor, kind, recipient.name, reason),
+          bodyText: this.scheduleEmailBody(event, actor, kind, recipient.name, reason, shouldReconfirm(recipient.userId)),
           metadata: {
             eventId: event.id,
             eventTitle: event.title,
@@ -306,7 +309,7 @@ export class ScheduleNotificationsService {
     return [
       `${input.recipientName}님,`,
       "",
-      `${input.productionTitle} 공연의 일정에 강제 배정되었습니다.`,
+      `${input.productionTitle} 공연의 일정에 강제 배정됐어요.`,
       "",
       `일정: ${input.eventTitle}`,
       `처리자: ${input.actorName}`,
@@ -368,10 +371,10 @@ export class ScheduleNotificationsService {
     return [
       `${recipientName}님,`,
       "",
-      `${event.production.title} 공연의 일정 참석 응답이 필요합니다.`,
+      `${event.production.title} 공연의 일정 참석 응답이 필요해요.`,
       "",
       `일정: ${event.title}`,
-      `유형: ${event.type}`,
+      `유형: ${EVENT_TYPE_LABELS[event.type]}`,
       `현재 응답: ${attendanceStatusLabel(attendance.status)}`,
       `시간: ${formatKoreanDateTime(event.startAt)} - ${formatKoreanDateTime(event.endAt)}`,
       event.location ? `장소: ${event.location}` : null,
@@ -399,7 +402,7 @@ export class ScheduleNotificationsService {
     return [...byUserId.values()];
   }
 
-  private scheduleNotificationPayload(event: ScheduleEventForNotification, actor: RequestUser, kind: ScheduleNotificationKind, reason?: string) {
+  private scheduleNotificationPayload(event: ScheduleEventForNotification, actor: RequestUser, kind: ScheduleNotificationKind, reason?: string, attendanceReset = false) {
     return {
       eventId: event.id,
       eventTitle: event.title,
@@ -412,7 +415,7 @@ export class ScheduleNotificationsService {
       actorName: actor.name,
       reason: reason || null,
       title: this.scheduleNotificationTitle(kind, event.title),
-      message: this.scheduleNotificationMessage(kind, event, reason)
+      message: this.scheduleNotificationMessage(kind, event, reason, attendanceReset)
     } satisfies Prisma.InputJsonObject;
   }
 
@@ -422,10 +425,11 @@ export class ScheduleNotificationsService {
     return `일정 취소: ${eventTitle}`;
   }
 
-  private scheduleNotificationMessage(kind: ScheduleNotificationKind, event: ScheduleEventForNotification, reason?: string) {
+  private scheduleNotificationMessage(kind: ScheduleNotificationKind, event: ScheduleEventForNotification, reason?: string, attendanceReset = false) {
     const prefix = kind === "created" ? "새 일정이 등록됐어요." : kind === "updated" ? "일정이 변경됐어요." : "일정이 취소됐어요.";
     const reasonText = kind === "canceled" && reason ? ` 사유: ${reason}` : "";
-    return `${prefix} ${formatKoreanDateTime(event.startAt)} - ${formatKoreanDateTime(event.endAt)}${reasonText}`;
+    const responseText = attendanceReset ? " 시간이 바뀌었으니 다시 응답해 주세요." : "";
+    return `${prefix} ${formatKoreanDateTime(event.startAt)} - ${formatKoreanDateTime(event.endAt)}${reasonText}${responseText}`;
   }
 
   private scheduleEmailTemplateKey(event: ScheduleEventForNotification, kind: ScheduleNotificationKind) {
@@ -450,13 +454,14 @@ export class ScheduleNotificationsService {
     actor: RequestUser,
     kind: ScheduleNotificationKind,
     recipientName: string,
-    reason?: string
+    reason?: string,
+    attendanceReset = false
   ) {
     const action = kind === "created" ? "등록" : kind === "canceled" ? "취소" : "변경";
     const leadingMessage =
       kind === "created" && event.type === EventType.READING
-        ? `${event.production.title} 공연의 리딩 일정이 등록되었습니다. 참석 가능 여부를 확인해 주세요.`
-        : `${event.production.title} 공연의 일정이 ${action}되었습니다.`;
+        ? `${event.production.title} 공연의 리딩 일정이 등록됐어요. 참석 가능 여부를 확인해 주세요.`
+        : `${event.production.title} 공연의 일정이 ${action}됐어요.`;
     const closingMessage =
       kind === "created" && event.type === EventType.READING
         ? "내 스케줄에서 참석 여부를 응답하고, 연결된 대본 장면과 음악 큐를 확인해 주세요."
@@ -467,12 +472,13 @@ export class ScheduleNotificationsService {
       leadingMessage,
       "",
       `일정: ${event.title}`,
-      `유형: ${event.type}`,
+      `유형: ${EVENT_TYPE_LABELS[event.type]}`,
       `시간: ${formatKoreanDateTime(event.startAt)} - ${formatKoreanDateTime(event.endAt)}`,
       event.location ? `장소: ${event.location}` : null,
       event.meetingUrl ? `회의 링크: ${event.meetingUrl}` : null,
       `처리자: ${actor.name}`,
       kind === "canceled" && reason ? `취소 사유: ${reason}` : null,
+      attendanceReset ? "일정 시간이 바뀌었으니 다시 응답해 주세요." : null,
       "",
       closingMessage
     ]

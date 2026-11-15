@@ -6,6 +6,13 @@ import { ProductionRole } from "@prisma/client";
  * 순수 함수 모음. DB/HTTP에 의존하지 않아 별도 DI 없이 그대로 import해서 쓴다.
  */
 
+export const PEOPLE_MANAGER_ROLES: readonly ProductionRole[] = [
+  ProductionRole.PRODUCER,
+  ProductionRole.DIRECTOR,
+  ProductionRole.MUSIC_DIRECTOR,
+  ProductionRole.STAGE_MANAGER
+];
+
 export function requiredText(value: string | undefined, message: string): string {
   const text = value?.trim();
   if (!text) {

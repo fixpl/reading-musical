@@ -104,7 +104,7 @@ export class DashboardService {
       }
     });
 
-    if (!production) {
+    if (!production || production.deletedAt) {
       throw new NotFoundException("찾을 수 없어요");
     }
 

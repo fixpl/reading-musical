@@ -13,10 +13,13 @@ import { ProductionNotificationsService } from "./production-notifications.servi
 import { ProductionReadinessService } from "./production-readiness.service";
 import { ProductionsService } from "./productions.service";
 import { StaffAssignmentsService } from "./staff-assignments.service";
+import { ProductionDeletionImpactController } from "./deletion-impact.controller";
+import { ActiveInvitationProductionGuard, NoRunningReadingGuard } from "./production-availability.guard";
+
 
 @Module({
   imports: [JwtModule.register({}), MailModule, NotificationsModule],
-  controllers: [ProductionsController, InvitationsController],
+  controllers: [ProductionsController, InvitationsController, ProductionDeletionImpactController],
   providers: [
     ProductionsService,
     ProductionAccessService,
@@ -27,7 +30,9 @@ import { StaffAssignmentsService } from "./staff-assignments.service";
     ProductionReadinessService,
     ProductionMembersService,
     ProductionDirectoryService,
-    RolesGuard
+    RolesGuard,
+    ActiveInvitationProductionGuard,
+    NoRunningReadingGuard
   ],
   exports: [ProductionsService]
 })

@@ -6,7 +6,7 @@ import { ProductionRoles } from "../common/decorators/production-roles.decorator
 import { JwtAuthGuard } from "../common/guards/jwt-auth.guard";
 import { RolesGuard } from "../common/guards/roles.guard";
 import type { RequestUser } from "../common/types/request-user";
-import { AttachReferenceFilesDto, ApplyCompositionImportDto, CompositionRevisionDto, PreviewCompositionImportDto, ReorderSectionsDto, WriteCompositionMediaDto, WriteSectionDto } from "./composition.dto";
+import { SyncSectionDto, AttachReferenceFilesDto, ApplyCompositionImportDto, CompositionRevisionDto, PreviewCompositionImportDto, ReorderSectionsDto, WriteCompositionMediaDto, WriteSectionDto } from "./composition.dto";
 import { CompositionService } from "./composition.service";
 
 @ApiTags("performance-composition")
@@ -41,6 +41,10 @@ export class CompositionController {
 
   @Post("sections/:sid/duplicate") @ProductionRoles("PRODUCER", "DIRECTOR")
   duplicate(@Param("pid") pid: string, @Param("sid") sid: string, @Body() dto: CompositionRevisionDto, @CurrentUser() user: RequestUser) { return this.service.duplicate(pid, sid, dto, user); }
+
+  // 대본 장면의 글과 구간 글을 한 방향으로 맞춘다(direction: PULL | PUSH).
+  @Post("sections/:sid/sync") @ProductionRoles("PRODUCER", "DIRECTOR")
+  sync(@Param("pid") pid: string, @Param("sid") sid: string, @Body() dto: SyncSectionDto, @CurrentUser() user: RequestUser) { return this.service.syncSection(pid, sid, dto, user); }
 
   @Post("sections/:sid/attachments") @ProductionRoles("PRODUCER", "DIRECTOR")
   attachReferences(@Param("pid") pid: string, @Param("sid") sid: string, @Body() dto: AttachReferenceFilesDto, @CurrentUser() user: RequestUser) { return this.service.attachReferences(pid, sid, dto, user); }

@@ -9,14 +9,16 @@ import {
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { JwtService } from "@nestjs/jwt";
-import { PlatformRole } from "@prisma/client";
+import { PlatformRole, Prisma } from "@prisma/client";
+import { SiteService } from "../site/site.service";
 import * as bcrypt from "bcryptjs";
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { CookieOptions, Response } from "express";
 import type { StringValue } from "ms";
 import { MailService } from "../mail/mail.service";
 import { PrismaService } from "../prisma/prisma.service";
-import { ForgotPasswordDto, LoginDto, RefreshDto, RegisterDto, ResetPasswordDto } from "./dto";
+import { ChangePasswordDto, ForgotPasswordDto, LoginDto, RefreshDto, RegisterDto, ResetPasswordDto } from "./dto";
+import { RegistrationEmailService } from "./registration-email.service";
 
 type PasswordResetPayload = {
   sub: string;
@@ -45,44 +47,37 @@ export class AuthService {
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
     private readonly config: ConfigService,
-    private readonly mail: MailService
+    private readonly mail: MailService,
+    private readonly site: SiteService,
+    private readonly registrationEmail: RegistrationEmailService
   ) {}
 
   async register(dto: RegisterDto) {
-    if (!dto.agreements?.terms || !dto.agreements?.privacy) {
-      throw new BadRequestException("필수 약관에 동의해 주세요");
+    // 기존 로그인·비밀번호 재설정의 이메일 식별 규칙을 그대로 유지한다.
+    const email = dto.email;
+    if (!dto.name.trim()) throw new BadRequestException("이름을 입력해 주세요.");
+    const exists = await this.prisma.user.findUnique({ where: { email } });
+    if (exists) throw new ConflictException("이미 가입된 이메일이에요");
+    const passwordHash = await bcrypt.hash(dto.password, 12);
+    let user;
+    try {
+      user = await this.prisma.$transaction(async (tx) => {
+        await this.registrationEmail.consumeProof(tx, email, dto.emailVerificationToken);
+        const consent = await this.site.registrationConsents(dto.agreements, dto.phone, tx);
+        const created = await tx.user.create({
+          data: { email, passwordHash, name: dto.name.trim(), phone: dto.phone?.trim() || null, profileType: dto.profileType, profileComplete: Boolean(dto.phone?.trim()), platformRole: PlatformRole.MEMBER,
+            marketingPrivacy: consent.marketingPrivacy, marketingEmail: consent.marketingEmail, marketingUpdatedAt: new Date(),
+            consentEvents: { createMany: { data: consent.events } } },
+          select: { id: true, email: true, name: true, status: true, platformRole: true, profileType: true }
+        });
+        if (consent.marketingPrivacy || consent.marketingEmail) await this.site.queueConsentReceipt(tx, created, consent.marketingPrivacy, consent.marketingEmail);
+        return created;
+      });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") throw new ConflictException("이미 가입된 이메일이에요");
+      throw error;
     }
-
-    const exists = await this.prisma.user.findUnique({ where: { email: dto.email } });
-    if (exists) {
-      throw new ConflictException("이미 가입된 이메일이에요");
-    }
-
-    const user = await this.prisma.user.create({
-      data: {
-        email: dto.email,
-        passwordHash: await bcrypt.hash(dto.password, 12),
-        name: dto.name,
-        phone: dto.phone,
-        profileType: dto.profileType,
-        profileComplete: Boolean(dto.phone),
-        platformRole: PlatformRole.MEMBER
-      },
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        status: true,
-        platformRole: true,
-        profileType: true
-      }
-    });
-
-    return {
-      user,
-      tokens: await this.issueTokens(user.id, user.email),
-      next: "/app"
-    };
+    return { user, tokens: await this.issueTokens(user.id, user.email), next: "/app" };
   }
 
   async login(dto: LoginDto) {
@@ -380,6 +375,33 @@ export class AuthService {
       refreshToken,
       refreshExpiresAt: new Date(Date.now() + this.durationToMs(this.refreshTokenExpiresIn()))
     };
+  }
+
+  // 로그인 상태에서 본인 비밀번호 변경. 다른 기기 세션은 모두 끊고 현재 기기용 새 토큰을 발급한다.
+  async changePassword(userId: string, dto: ChangePasswordDto) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user || user.status !== "ACTIVE") {
+      throw new UnauthorizedException("로그인이 필요해요");
+    }
+    if (!(await bcrypt.compare(dto.currentPassword, user.passwordHash))) {
+      throw new BadRequestException("현재 비밀번호가 맞지 않아요");
+    }
+    if (dto.currentPassword === dto.newPassword) {
+      throw new BadRequestException("현재 비밀번호와 다른 비밀번호를 입력해 주세요");
+    }
+
+    await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id: user.id },
+        data: { passwordHash: await bcrypt.hash(dto.newPassword, 12), failedLoginCount: 0, lockedUntil: null }
+      }),
+      this.prisma.authSession.updateMany({
+        where: { userId: user.id, revokedAt: null },
+        data: { revokedAt: new Date(), revokedReason: "PASSWORD_CHANGED" }
+      })
+    ]);
+
+    return { ok: true, tokens: await this.issueTokens(user.id, user.email) };
   }
 
   private publicTokens(tokens: SignedTokenPair) {

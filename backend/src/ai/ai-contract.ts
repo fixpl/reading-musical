@@ -10,6 +10,7 @@ export function readLlmSettings(env: Record<string, string | undefined>) {
     throw new Error("LLM_BASE_URL은 인증정보가 없는 HTTPS 주소여야 합니다");
   }
   const nvidia = url.hostname === "integrate.api.nvidia.com";
+  const exaone = url.hostname === "api.exaone.ai";
   if (env.NVIDIA_API_KEY?.trim() && !nvidia) {
     throw new Error("NVIDIA_API_KEY와 LLM_BASE_URL의 공급자가 다릅니다. NVIDIA 주소를 설정해 주세요");
   }
@@ -23,6 +24,7 @@ export function readLlmSettings(env: Record<string, string | undefined>) {
     return value;
   };
   const model = env.LLM_MODEL?.trim() || NVIDIA_MODEL;
+  const isOpenAiTerra = url.hostname === "api.openai.com" && model === "gpt-6.1-terra";
   let extra: Record<string, unknown> = nvidia && model.startsWith("deepseek-ai/deepseek-v4")
     ? { chat_template_kwargs: { thinking: false } } : {};
   if (env.LLM_EXTRA_BODY_JSON?.trim()) {
@@ -35,13 +37,13 @@ export function readLlmSettings(env: Record<string, string | undefined>) {
     }
   }
   return {
-    apiKey, baseURL, model, extra,
+    apiKey, baseURL, model, extra, isExaone: exaone, isOpenAiTerra,
     temperature: number("LLM_TEMPERATURE", 1, 0, 1),
     topP: number("LLM_TOP_P", 0.95, 0.01, 1),
     maxTokens: number("LLM_MAX_TOKENS", 16_384, 256, 16_384, true),
-    seed: number("LLM_SEED", 42, 0, 2_147_483_647, true),
-    timeout: number("LLM_TIMEOUT_MS", 180_000, 1_000, 300_000, true),
-    maxRetries: number("LLM_MAX_RETRIES", 2, 0, 3, true),
+    seed: exaone || isOpenAiTerra ? undefined : number("LLM_SEED", 42, 0, 2_147_483_647, true),
+    timeout: number("LLM_TIMEOUT_MS", 150_000, 1_000, 300_000, true),
+    maxRetries: number("LLM_MAX_RETRIES", 1, 0, 3, true),
     jsonMode: env.LLM_JSON_MODE === "true"
   };
 }
@@ -96,13 +98,13 @@ export function scriptSource(text: string): { annotated: string; lines: SourceLi
 }
 
 type TimedDraft = { acts: Array<{ scenes: Array<{
-  lines: Array<{ text: string; sourceLine?: number | null; startMs: number | null; durationMs: number | null }>;
+  lines: Array<{ text: string; sourceLine?: number | null; startMs: number | null; durationMs: number | null; kind?: string; speaker?: string | null }>;
   cues: Array<{ sourceLine?: number | null; startMs: number | null; seconds: number | null }>;
 }> }> };
 const comparable = (text: string) => text.replace(/\s+/g, " ").trim();
 
 /** Never trust a model's guessed start time over the uploaded source. */
-export function bindSourceTimes(draft: TimedDraft, source: SourceLine[], requiredLineIds?: Set<number>) {
+export function bindSourceTimes(draft: TimedDraft, source: SourceLine[], requiredLineIds?: Set<number>, options: { keepMissingAsNotes?: boolean } = {}) {
   const scoped = source.filter((line) => !requiredLineIds || requiredLineIds.has(line.id));
   const byId = new Map(scoped.map((line) => [line.id, line]));
   const used = new Set<number>();
@@ -133,5 +135,19 @@ export function bindSourceTimes(draft: TimedDraft, source: SourceLine[], require
   }
   // A cue summary is not a substitute for the source dialogue or stage direction.
   const missing = scoped.filter((line) => line.body && !used.has(line.id));
+  if (missing.length && options.keepMissingAsNotes) {
+    // 모델이 빠뜨린 원문(제목·연출 메모 등)은 버리지 않고, 원문 순서상 가장 가까운 장면에 메모로 보존한다.
+    const scenes = draft.acts.flatMap((act) => act.scenes);
+    const firstLine = (scene: (typeof scenes)[number]) => Math.min(...scene.lines.map((line) => line.sourceLine ?? Infinity));
+    for (const original of missing) {
+      const target = [...scenes].reverse().find((scene) => scene.lines.length && firstLine(scene) <= original.id) ?? scenes[0];
+      if (!target) throw new Error("보존할 장면이 없어 원문을 담지 못했습니다. 다시 분석해 주세요");
+      const at = target.lines.findIndex((line) => (line.sourceLine ?? 0) > original.id);
+      const note = { kind: "메모", speaker: null, text: original.body, sourceLine: original.id, startMs: original.startMs, durationMs: original.durationMs };
+      target.lines.splice(at < 0 ? target.lines.length : at, 0, note);
+      used.add(original.id);
+    }
+    return;
+  }
   if (missing.length) throw new Error(`원문 ${missing[0].id}행이 대본에서 누락되었습니다. 시간표시 유무와 관계없이 원문을 보존하여 다시 분석해 주세요`);
 }

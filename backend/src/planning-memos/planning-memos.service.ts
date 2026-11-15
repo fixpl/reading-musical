@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import type { RequestUser } from "../common/types/request-user";
 import { CreatePlanningMemoDto, UpdatePlanningMemoDto } from "./dto";
-import { isPlatformAdmin } from "../common/access/is-production-admin";
+import { isProductionAdmin } from "../common/access/is-production-admin";
 
 const MEMO_INCLUDE = {
   author: { select: { id: true, name: true } },
@@ -44,7 +44,7 @@ export class PlanningMemosService {
 
   async update(productionId: string, memoId: string, dto: UpdatePlanningMemoDto, user: RequestUser) {
     const memo = await this.findOrThrow(productionId, memoId);
-    this.assertCanModify(memo.authorId, user);
+    await this.assertCanModify(productionId, memo.authorId, user);
 
     return this.prisma.planningMemo.update({
       where: { id: memo.id },
@@ -55,7 +55,7 @@ export class PlanningMemosService {
 
   async remove(productionId: string, memoId: string, user: RequestUser) {
     const memo = await this.findOrThrow(productionId, memoId);
-    this.assertCanModify(memo.authorId, user);
+    await this.assertCanModify(productionId, memo.authorId, user);
 
     await this.prisma.planningMemo.delete({ where: { id: memo.id } });
     return { ok: true };
@@ -71,8 +71,8 @@ export class PlanningMemosService {
     return memo;
   }
 
-  private assertCanModify(authorId: string, user: RequestUser) {
-    if (authorId !== user.id && !isPlatformAdmin(user)) {
+  private async assertCanModify(productionId: string, authorId: string, user: RequestUser) {
+    if (authorId !== user.id && !(await isProductionAdmin(this.prisma, user, productionId))) {
       throw new ForbiddenException("작성자만 수정하거나 삭제할 수 있습니다");
     }
   }

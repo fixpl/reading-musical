@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional, PartialType } from "@nestjs/swagger";
 import { AttendanceStatus, EventType } from "@prisma/client";
 import { Transform, Type } from "class-transformer";
 import {
+  ArrayMaxSize,
   ArrayMinSize,
   ArrayUnique,
   IsArray,
@@ -12,6 +13,7 @@ import {
   IsString,
   IsUrl,
   IsUUID,
+  MaxLength,
   MinLength,
   ValidateNested
 } from "class-validator";
@@ -21,6 +23,7 @@ export class CreateScheduleEventDto {
   @Transform(({ value }) => typeof value === "string" ? value.trim() : value)
   @IsString()
   @MinLength(1)
+  @MaxLength(120)
   title!: string;
 
   @ApiPropertyOptional({ enum: EventType })
@@ -44,11 +47,13 @@ export class CreateScheduleEventDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
+  @MaxLength(120)
   location?: string | null;
 
   @ApiPropertyOptional({ description: "PRD payload compatibility alias for location" })
   @IsOptional()
   @IsString()
+  @MaxLength(120)
   venue?: string | null;
 
   @ApiPropertyOptional()
@@ -59,6 +64,7 @@ export class CreateScheduleEventDto {
   @ApiPropertyOptional({ type: [String] })
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(500)
   @ArrayUnique()
   @IsUUID(undefined, { each: true })
   sceneIds?: string[];
@@ -66,6 +72,7 @@ export class CreateScheduleEventDto {
   @ApiPropertyOptional({ type: [String] })
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(500)
   @ArrayUnique()
   @IsUUID(undefined, { each: true })
   musicCueIds?: string[];
@@ -73,6 +80,7 @@ export class CreateScheduleEventDto {
   @ApiPropertyOptional({ type: [String] })
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(500)
   @ArrayUnique()
   @IsUUID(undefined, { each: true })
   attendeeMembershipIds?: string[];
@@ -80,6 +88,7 @@ export class CreateScheduleEventDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
+  @MaxLength(500)
   overrideReason?: string | null;
 
   @ApiPropertyOptional({ default: true })
@@ -94,12 +103,14 @@ export class DeleteScheduleEventDto {
   @ApiProperty()
   @IsString()
   @MinLength(1)
+  @MaxLength(500)
   reason!: string;
 }
 
 export class PutEventScenesDto {
   @ApiProperty({ type: [String] })
   @IsArray()
+  @ArrayMaxSize(500)
   @ArrayUnique()
   @IsUUID(undefined, { each: true })
   sceneIds!: string[];
@@ -108,6 +119,7 @@ export class PutEventScenesDto {
 export class PutEventMusicCuesDto {
   @ApiProperty({ type: [String] })
   @IsArray()
+  @ArrayMaxSize(500)
   @ArrayUnique()
   @IsUUID(undefined, { each: true })
   musicCueIds!: string[];
@@ -133,6 +145,7 @@ export class UpsertAttendanceDto {
   @ApiPropertyOptional({ type: [String] })
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(500)
   @ArrayMinSize(1)
   @ArrayUnique()
   @IsUUID(undefined, { each: true })
@@ -146,6 +159,7 @@ export class UpsertAttendanceDto {
   @ApiPropertyOptional({ type: [AttendanceEntryDto] })
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(500)
   @ArrayUnique((entry: AttendanceEntryDto) => entry?.membershipId)
   @ValidateNested({ each: true })
   @Type(() => AttendanceEntryDto)
@@ -154,6 +168,7 @@ export class UpsertAttendanceDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
+  @MaxLength(500)
   overrideReason?: string | null;
 }
 
@@ -161,6 +176,7 @@ export class CreateAvailabilityDto {
   @ApiPropertyOptional({ description: "본인에게만 보이는 개인 일정 제목" })
   @IsOptional()
   @IsString()
+  @MaxLength(120)
   title?: string | null;
 
   @ApiProperty()
@@ -179,6 +195,7 @@ export class CreateAvailabilityDto {
   @ApiPropertyOptional({ description: "본인에게만 보이는 개인 메모" })
   @IsOptional()
   @IsString()
+  @MaxLength(500)
   reason?: string | null;
 }
 

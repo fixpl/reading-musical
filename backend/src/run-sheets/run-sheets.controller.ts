@@ -1,10 +1,11 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards, UseInterceptors } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
 import { PlatformRoles } from "../common/decorators/platform-roles.decorator";
 import { ProductionRoles } from "../common/decorators/production-roles.decorator";
 import { JwtAuthGuard } from "../common/guards/jwt-auth.guard";
 import { RolesGuard } from "../common/guards/roles.guard";
+import { MaskEmailsInterceptor } from "../common/mask-emails.interceptor";
 import type { RequestUser } from "../common/types/request-user";
 import {
   CompleteRunSheetDto,
@@ -28,6 +29,7 @@ const RUN_SHEET_EDIT_ROLES = ["PRODUCER", "DIRECTOR", "STAGE_MANAGER"] as const;
 @PlatformRoles("SUPER_ADMIN", "ORG_ADMIN")
 @ProductionRoles(...ALL_PRODUCTION_ROLES)
 @UseGuards(JwtAuthGuard, RolesGuard)
+@UseInterceptors(MaskEmailsInterceptor)
 @Controller("productions/:pid/run-sheets")
 export class RunSheetsController {
   constructor(private readonly runSheetsService: RunSheetsService) {}

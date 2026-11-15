@@ -88,10 +88,17 @@ export class ReviewedSectionDto {
   @IsString() @MaxLength(200000) lyrics!: string;
   @IsOptional() @IsUUID() sourceScriptId?: string | null;
   @IsOptional() @IsUUID() sourceSceneId?: string | null;
+  // 검수된 구간 길이(ms). 비우면 하위 구간·자료 길이로 자동 계산한다.
+  @IsOptional() @IsInt() @Min(1000) @Max(MAX_COMPOSITION_MS) durationMs?: number | null;
 }
 
 export class ApplyCompositionImportDto extends CompositionRevisionDto {
   @IsArray() @ArrayMinSize(1) @ArrayMaxSize(500) @ValidateNested({ each: true }) @Type(() => ReviewedSectionDto)
   sections!: ReviewedSectionDto[];
   @IsOptional() @IsUUID() sourceAssetId?: string;
+}
+
+// 대본 ↔ 구간 글 동기화 방향. PULL: 대본 → 구간, PUSH: 구간 → 대본.
+export class SyncSectionDto extends CompositionRevisionDto {
+  @IsIn(["PULL", "PUSH"]) direction!: "PULL" | "PUSH";
 }

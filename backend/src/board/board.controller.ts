@@ -1,6 +1,5 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
-import { BoardCategory } from "@prisma/client";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
 import { PlatformRoles } from "../common/decorators/platform-roles.decorator";
 import { ProductionRoles } from "../common/decorators/production-roles.decorator";
@@ -8,7 +7,7 @@ import { JwtAuthGuard } from "../common/guards/jwt-auth.guard";
 import { RolesGuard } from "../common/guards/roles.guard";
 import type { RequestUser } from "../common/types/request-user";
 import { BoardService } from "./board.service";
-import { CreateBoardCommentDto, CreateBoardPostDto, UpdateBoardPostDto } from "./dto";
+import { CreateBoardCommentDto, CreateBoardPostDto, ListBoardPostsDto, UpdateBoardPostDto } from "./dto";
 
 @ApiTags("board")
 @ApiBearerAuth()
@@ -23,9 +22,9 @@ export class BoardController {
   list(
     @Param("productionId") productionId: string,
     @CurrentUser() user: RequestUser,
-    @Query("category") category?: BoardCategory
+    @Query() query: ListBoardPostsDto
   ) {
-    return this.boardService.list(productionId, category, user);
+    return this.boardService.list(productionId, query, user);
   }
 
   @Post()

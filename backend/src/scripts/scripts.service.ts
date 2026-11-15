@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, Optional } from "@nestjs/common";
 import { AnchorStatus, Prisma, ProductionRole } from "@prisma/client";
 import { assertProductionMembership } from "../common/access/assert-production-membership";
 import { isProductionAdmin } from "../common/access/is-production-admin";
@@ -18,7 +18,8 @@ import {
 } from "./dto";
 import { ScriptEntityLookupService } from "./script-entity-lookup.service";
 import { ScriptNotificationsService } from "./script-notifications.service";
-import { anchorBrokenException } from "./script-shared.util";
+import { SectionSyncService } from "./section-sync.service";
+import { anchorBrokenException, VERSION_METADATA_SELECT } from "./script-shared.util";
 import { ScriptSnapshotService } from "./script-snapshot.service";
 
 type ScriptWithAnnotations = {
@@ -55,7 +56,8 @@ export class ScriptsService {
     private readonly prisma: PrismaService,
     private readonly entities: ScriptEntityLookupService,
     private readonly snapshot: ScriptSnapshotService,
-    private readonly scriptNotifications: ScriptNotificationsService
+    private readonly scriptNotifications: ScriptNotificationsService,
+    @Optional() private readonly sectionSync?: SectionSyncService
   ) {}
 
   async listScripts(productionId: string, user: RequestUser) {
@@ -73,7 +75,7 @@ export class ScriptsService {
             }
           }
         },
-        versions: { orderBy: { createdAt: "desc" }, take: 5 },
+        versions: { orderBy: { createdAt: "desc" }, take: 5, select: VERSION_METADATA_SELECT },
         imports: { orderBy: { createdAt: "desc" }, take: 5 }
       }
     });
@@ -104,7 +106,6 @@ export class ScriptsService {
 
   async getScript(productionId: string, scriptId: string, user: RequestUser) {
     await this.assertMembership(productionId, user, VIEW_ROLES);
-    const canSeeAllAnnotations = await this.hasAnyRole(productionId, user, EDIT_ROLES);
     const script = await this.prisma.script.findFirst({
       where: { id: scriptId, productionId, deletedAt: null },
       include: this.snapshot.scriptDetailInclude()
@@ -112,7 +113,7 @@ export class ScriptsService {
     if (!script) {
       throw new NotFoundException("대본을 찾을 수 없어요");
     }
-    return this.filterPrivateAnnotations(script as unknown as ScriptWithAnnotations, user.id, canSeeAllAnnotations);
+    return this.filterPrivateAnnotations(script as unknown as ScriptWithAnnotations, user.id);
   }
 
   /**
@@ -159,38 +160,45 @@ export class ScriptsService {
   async createAct(productionId: string, scriptId: string, dto: CreateActDto, user: RequestUser) {
     await this.assertMembership(productionId, user, EDIT_ROLES);
     await this.entities.assertScript(productionId, scriptId);
-    const maxOrder = await this.entities.getMaxActOrder(scriptId);
-    return this.prisma.act.create({
-      data: {
-        scriptId,
-        order: maxOrder + 1,
-        title: dto.title.trim(),
-        scenes: {
-          create: {
-            order: 1,
-            title: dto.initialSceneTitle?.trim() || "1장"
+    return this.prisma.$transaction(async (tx) => {
+      // 같은 공연의 순서 계산을 직렬화하여 동시에 추가해도 순서가 겹치지 않게 한다.
+      await tx.production.update({ where: { id: productionId }, data: { compositionRevision: { increment: 0 } } });
+      const maxOrder = await this.entities.getMaxActOrder(scriptId, tx);
+      return tx.act.create({
+        data: {
+          scriptId,
+          order: maxOrder + 1,
+          title: dto.title.trim(),
+          scenes: {
+            create: {
+              order: 1,
+              title: dto.initialSceneTitle?.trim() || "1장"
+            }
           }
-        }
-      },
-      include: { scenes: { orderBy: { order: "asc" }, include: { blocks: { orderBy: { order: "asc" } } } } }
+        },
+        include: { scenes: { orderBy: { order: "asc" }, include: { blocks: { orderBy: { order: "asc" } } } } }
+      });
     });
   }
 
   async createScene(productionId: string, actId: string, dto: CreateSceneDto, user: RequestUser) {
     await this.assertMembership(productionId, user, EDIT_ROLES);
     const act = await this.entities.assertAct(productionId, actId);
-    const aggregate = await this.prisma.scene.aggregate({
-      where: { actId },
-      _max: { order: true }
-    });
-    return this.prisma.scene.create({
-      data: {
-        actId: act.id,
-        order: (aggregate._max.order ?? 0) + 1,
-        title: dto.title.trim(),
-        summary: dto.summary?.trim() || null
-      },
-      include: { blocks: { orderBy: { order: "asc" } } }
+    return this.prisma.$transaction(async (tx) => {
+      await tx.production.update({ where: { id: productionId }, data: { compositionRevision: { increment: 0 } } });
+      const aggregate = await tx.scene.aggregate({
+        where: { actId },
+        _max: { order: true }
+      });
+      return tx.scene.create({
+        data: {
+          actId: act.id,
+          order: (aggregate._max.order ?? 0) + 1,
+          title: dto.title.trim(),
+          summary: dto.summary?.trim() || null
+        },
+        include: { blocks: { orderBy: { order: "asc" } } }
+      });
     });
   }
 
@@ -199,14 +207,11 @@ export class ScriptsService {
     const scene = await this.entities.assertScene(productionId, sceneId);
     await this.entities.assertCharacterInProduction(productionId, dto.characterId);
 
-    const aggregate = await this.prisma.sceneBlock.aggregate({
-      where: { sceneId },
-      _max: { order: true }
-    });
-    const maxOrder = aggregate._max.order ?? 0;
-    const nextOrder = Math.min(Math.max(dto.order ?? maxOrder + 1, 1), maxOrder + 1);
-
-    return this.prisma.$transaction(async (tx) => {
+    return this.keepSectionsInSync(productionId, scene.id, () => this.prisma.$transaction(async (tx) => {
+      await tx.production.update({ where: { id: productionId }, data: { compositionRevision: { increment: 0 } } });
+      const aggregate = await tx.sceneBlock.aggregate({ where: { sceneId }, _max: { order: true } });
+      const maxOrder = aggregate._max.order ?? 0;
+      const nextOrder = Math.min(Math.max(dto.order ?? maxOrder + 1, 1), maxOrder + 1);
       if (nextOrder <= maxOrder) {
         await tx.sceneBlock.updateMany({
           where: { sceneId, order: { gte: nextOrder } },
@@ -224,25 +229,30 @@ export class ScriptsService {
           text: dto.text.trim()
         }
       });
-    });
+    }));
   }
 
   async updateBlock(productionId: string, blockId: string, dto: UpdateBlockDto, user: RequestUser) {
     await this.assertMembership(productionId, user, EDIT_ROLES);
-    await this.entities.assertBlock(productionId, blockId);
+    const existing = await this.entities.assertBlock(productionId, blockId);
     await this.entities.assertCharacterInProduction(productionId, dto.characterId);
 
-    return this.prisma.sceneBlock.update({
-      where: { id: blockId },
-      data: {
-        type: dto.type,
-        text: dto.text?.trim(),
-        characterId: dto.characterId === undefined ? undefined : dto.characterId || null,
-        cueLabel: dto.cueLabel === undefined ? undefined : dto.cueLabel?.trim() || null,
-        startMs: dto.startMs === undefined ? undefined : dto.startMs,
-        durationMs: dto.durationMs === undefined ? undefined : dto.durationMs
-      }
-    });
+    return this.keepSectionsInSync(productionId, existing.sceneId, () => this.prisma.$transaction(async (tx) => {
+      await tx.production.update({ where: { id: productionId }, data: { compositionRevision: { increment: 0 } } });
+      const updated = await tx.sceneBlock.updateMany({
+        where: { id: blockId, updatedAt: dto.expectedUpdatedAt ? new Date(dto.expectedUpdatedAt) : existing.updatedAt },
+        data: {
+          type: dto.type,
+          text: dto.text?.trim(),
+          characterId: dto.characterId === undefined ? undefined : dto.characterId || null,
+          cueLabel: dto.cueLabel === undefined ? undefined : dto.cueLabel?.trim() || null,
+          startMs: dto.startMs === undefined ? undefined : dto.startMs,
+          durationMs: dto.durationMs === undefined ? undefined : dto.durationMs
+        }
+      });
+      if (updated.count !== 1) throw new ConflictException("다른 사용자가 이 줄을 수정했어요. 작성 중인 내용을 보관한 뒤 최신 대본을 불러와 다시 적용해 주세요.");
+      return tx.sceneBlock.findUniqueOrThrow({ where: { id: blockId } });
+    }));
   }
 
   async deleteBlock(productionId: string, blockId: string, force: boolean, user: RequestUser) {
@@ -261,7 +271,8 @@ export class ScriptsService {
       });
     }
 
-    await this.prisma.$transaction(async (tx) => {
+    await this.keepSectionsInSync(productionId, block.sceneId, () => this.prisma.$transaction(async (tx) => {
+      await tx.production.update({ where: { id: productionId }, data: { compositionRevision: { increment: 0 } } });
       await tx.annotation.updateMany({
         where: { anchorBlockId: blockId },
         data: { anchorBlockId: null, anchorStatus: AnchorStatus.BROKEN }
@@ -280,7 +291,7 @@ export class ScriptsService {
       for (const [index, item] of remaining.entries()) {
         await tx.sceneBlock.update({ where: { id: item.id }, data: { order: index + 1 } });
       }
-    });
+    }, { timeout: 30000 }));
 
     return { deletedId: blockId, impact };
   }
@@ -297,9 +308,14 @@ export class ScriptsService {
       throw new BadRequestException("장면의 모든 블록을 정확히 포함해야 순서를 저장할 수 있어요");
     }
 
-    await this.prisma.$transaction(
-      dto.blockIds.map((id, index) => this.prisma.sceneBlock.update({ where: { id }, data: { order: index + 1 } }))
-    );
+    await this.keepSectionsInSync(productionId, sceneId, () => this.prisma.$transaction(async (tx) => {
+      await tx.production.update({ where: { id: productionId }, data: { compositionRevision: { increment: 0 } } });
+      const current = await tx.sceneBlock.findMany({ where: { sceneId }, select: { id: true } });
+      if (current.length !== dto.blockIds.length || current.some(block => !dto.blockIds.includes(block.id))) {
+        throw new ConflictException("다른 사용자가 줄 구성을 수정했어요. 최신 대본을 불러와 순서를 다시 정해 주세요.");
+      }
+      for (const [index, id] of dto.blockIds.entries()) await tx.sceneBlock.update({ where: { id }, data: { order: index + 1 } });
+    }, { timeout: 30000 }));
     return { blockIds: dto.blockIds };
   }
 
@@ -314,11 +330,17 @@ export class ScriptsService {
     return version;
   }
 
-  async restoreVersion(productionId: string, scriptId: string, versionId: string, dto: RestoreScriptVersionDto, user: RequestUser) {
+  async restoreVersion(
+    productionId: string,
+    scriptId: string,
+    versionId: string,
+    dto: RestoreScriptVersionDto,
+    user: RequestUser
+  ) {
     await this.assertMembership(productionId, user, EDIT_ROLES);
     await this.entities.assertScript(productionId, scriptId);
     const version = await this.prisma.scriptVersion.findFirst({
-      where: { id: versionId, scriptId, script: { productionId } }
+      where: { id: versionId, scriptId, script: { productionId, deletedAt: null } }
     });
     if (!version) {
       throw new NotFoundException("복원할 대본 버전을 찾을 수 없어요");
@@ -332,7 +354,7 @@ export class ScriptsService {
     );
 
     const current = await this.prisma.script.findFirst({
-      where: { id: scriptId, productionId },
+      where: { id: scriptId, productionId, deletedAt: null },
       include: {
         acts: {
           include: {
@@ -365,7 +387,7 @@ export class ScriptsService {
     }
     if (!dto.force && impact.blockAnchors.total > 0) {
       throw anchorBrokenException({
-        message: "복원하면 현재 블록에 연결된 주석 또는 음악 큐 anchor가 끊겨요. 영향 내용을 확인한 뒤 force=true로 다시 시도해 주세요.",
+        message: "복원하면 현재 줄에 연결된 주석 또는 음악 큐 연결이 끊겨요. 영향 내용을 확인한 뒤 강제 복원을 선택해 주세요.",
         canForce: true,
         impact
       });
@@ -447,6 +469,8 @@ export class ScriptsService {
                 type: block.type,
                 text: block.text,
                 cueLabel: block.cueLabel,
+                startMs: block.startMs,
+                durationMs: block.durationMs,
                 characterId
               },
               create: {
@@ -456,6 +480,8 @@ export class ScriptsService {
                 type: block.type,
                 text: block.text,
                 cueLabel: block.cueLabel,
+                startMs: block.startMs,
+                durationMs: block.durationMs,
                 characterId
               }
             });
@@ -489,11 +515,10 @@ export class ScriptsService {
   async listAnnotations(productionId: string, blockId: string, user: RequestUser) {
     await this.assertMembership(productionId, user, VIEW_ROLES);
     const block = await this.entities.assertBlock(productionId, blockId);
-    const canSeeAll = await this.hasAnyRole(productionId, user, EDIT_ROLES);
     return this.prisma.annotation.findMany({
       where: {
         anchorBlockId: block.id,
-        OR: canSeeAll ? undefined : [{ isShared: true }, { authorId: user.id }]
+        OR: [{ isShared: true }, { authorId: user.id }]
       },
       orderBy: { createdAt: "asc" }
     });
@@ -567,10 +592,11 @@ export class ScriptsService {
     return count > 0;
   }
 
-  private filterPrivateAnnotations<T extends ScriptWithAnnotations>(script: T, userId: string, canSeeAll: boolean) {
-    if (canSeeAll) {
-      return script;
-    }
+  private filterPrivateAnnotations<T extends ScriptWithAnnotations>(
+    script: T,
+    userId: string
+  ) {
+    // 공연 편집 권한은 다른 작성자의 개인 주석 열람 권한을 포함하지 않는다.
     return {
       ...script,
       acts: script.acts.map((act) => ({
@@ -584,5 +610,9 @@ export class ScriptsService {
         }))
       }))
     };
+  }
+
+  private keepSectionsInSync<T>(productionId: string, sceneId: string, work: () => Promise<T>): Promise<T> {
+    return this.sectionSync ? this.sectionSync.keepInSync(productionId, sceneId, work) : work();
   }
 }

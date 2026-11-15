@@ -12,6 +12,8 @@ export type CompositionSection = {
   scriptText: string; lyrics: string; startMs: number | null; durationMs: number | null;
   backgroundMode: MediaMode; musicMode: MediaMode; scoreMode: MediaMode;
   sourceScriptId: string | null; sourceSceneId: string | null; media: CompositionMedia[]; timing: SectionTiming;
+  // 대본 장면과 연결된 구간의 글 상태: SYNCED(같은 글) · DIVERGED(달라짐) · null(연결 없음)
+  syncState?: "SYNCED" | "DIVERGED" | null;
 };
 export type CompositionBoard = {
   production: { id: string; title: string }; revision: number; canEdit: boolean; durationMs: number;
@@ -35,6 +37,10 @@ export function sectionOrder(sections: CompositionSection[]): CompositionSection
   const sorted = [...sections].sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
   return sorted.filter((s) => !s.parentId).flatMap((root) => [root, ...sorted.filter((s) => s.parentId === root.id)]);
 }
+export function hasScriptMaterial(section: Pick<CompositionSection, "scriptText" | "lyrics">): boolean {
+  return Boolean(section.lyrics.trim() || section.scriptText.trim() && !isNotesOnly(section));
+}
+
 export function activeSection(sections: CompositionSection[], timeMs: number): CompositionSection | null {
   return sections.filter((s) => timeMs >= s.timing.startMs && timeMs < s.timing.startMs + s.timing.durationMs)
     .sort((a, b) => b.timing.depth - a.timing.depth)[0] ?? null;
@@ -70,11 +76,13 @@ export function formatTime(ms: number): string {
   return `${h ? `${h}:` : ""}${String(Math.floor(sec / 60) % 60).padStart(2, "0")}:${String(sec % 60).padStart(2, "0")}`;
 }
 export function secondsInput(value: string, nullable = true, minimumMs = 0): number | null {
-  if (!value.trim()) { if (nullable) return null; throw new Error("시간을 입력하세요."); }
-  const number = Number(value);
-  if (!Number.isFinite(number) || number < 0 || number > 86400) throw new Error("시간은 0~86,400초의 숫자로 입력하세요.");
+  if (!value.trim()) { if (nullable) return null; throw new Error("시간을 입력해 주세요."); }
+  // 초(210, 3.5) 또는 분:초(3:30)로 입력할 수 있다.
+  const clock = value.trim().match(/^(\d+):(\d{1,2}(?:\.\d+)?)$/);
+  const number = clock ? (Number(clock[2]) < 60 ? Number(clock[1]) * 60 + Number(clock[2]) : NaN) : Number(value);
+  if (!Number.isFinite(number) || number < 0 || number > 86400) throw new Error("시간은 초(210) 또는 분:초(3:30)로 입력해 주세요. 최대 24시간까지 입력할 수 있어요.");
   const ms = Math.round(number * 1000);
-  if (ms < minimumMs) throw new Error(`길이는 ${minimumMs / 1000}초 이상이어야 합니다.`);
+  if (ms < minimumMs) throw new Error(`길이는 ${minimumMs / 1000}초 이상으로 입력해 주세요.`);
   return ms;
 }
 export function acceptsAsset(asset: Pick<MediaAsset, "mime">, slot: MediaSlot): boolean {
@@ -83,4 +91,11 @@ export function acceptsAsset(asset: Pick<MediaAsset, "mime">, slot: MediaSlot): 
   if (slot === "BACKGROUND") return images.includes(asset.mime) || ["video/mp4", "video/webm", "video/quicktime"].includes(asset.mime);
   if (slot === "MUSIC") return ["audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/mp4", "audio/aac", "audio/x-m4a"].includes(asset.mime);
   return images.includes(asset.mime) || ["application/pdf", "text/plain", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"].includes(asset.mime);
+}
+
+/** 제작진 메모(※)만 있는 구간 — 공연 시간을 차지하지 않는 "연출 메모" 같은 장면. 영상·자료 현황에서 뺀다. */
+export function isNotesOnly(section: Pick<CompositionSection, "scriptText" | "lyrics">): boolean {
+  if (section.lyrics.trim()) return false;
+  const lines = section.scriptText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return lines.length > 0 && lines.every((line) => line.startsWith("※"));
 }

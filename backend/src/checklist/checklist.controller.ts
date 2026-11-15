@@ -1,4 +1,5 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards, UseInterceptors } from "@nestjs/common";
+import { MaskEmailsInterceptor } from "../common/mask-emails.interceptor";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { PlatformRoles } from "../common/decorators/platform-roles.decorator";
 import { ProductionRoles } from "../common/decorators/production-roles.decorator";
@@ -24,6 +25,7 @@ const CHECKLIST_EDIT_ROLES = ["PRODUCER", "DIRECTOR", "STAGE_MANAGER"] as const;
 @PlatformRoles("SUPER_ADMIN", "ORG_ADMIN")
 @ProductionRoles(...ALL_PRODUCTION_ROLES)
 @UseGuards(JwtAuthGuard, RolesGuard)
+@UseInterceptors(MaskEmailsInterceptor)
 @Controller("productions/:pid/checklist")
 export class ChecklistController {
   constructor(private readonly checklistService: ChecklistService) {}

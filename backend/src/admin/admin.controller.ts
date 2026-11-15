@@ -1,20 +1,30 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards, Delete } from "@nestjs/common";
+import { Body, Controller, Get, Param, Patch, Post, Query, Res, UseGuards, Delete } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
+import type { Response } from "express";
 import { PlatformRoles } from "../common/decorators/platform-roles.decorator";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
 import { JwtAuthGuard } from "../common/guards/jwt-auth.guard";
 import { RolesGuard } from "../common/guards/roles.guard";
+import { RateLimitGuard } from "../common/guards/rate-limit.guard";
+import { RateLimit } from "../common/decorators/rate-limit.decorator";
 import type { RequestUser } from "../common/types/request-user";
+import { AdminOpsService } from "./admin-ops.service";
 import { AdminService } from "./admin.service";
+import { AssistantScheduleService } from "./assistant-schedule.service";
+import { ProductionAssistantService } from "./production-assistant.service";
 import {
   AdminListQueryDto,
   AdminAttendanceStatusDto, AdminAvailabilityDto, ChangeUserStatusDto,
+  ConfirmAssistantScheduleDto,
   CreateChecklistTemplateDto,
   CreateOrganizationDto,
+  ProductionAssistantDto,
   ProfileRequestDto,
+  SetUserPasswordDto,
   UpdateChecklistTemplateDto,
   UpdateOrganizationDto,
-  UpdateSystemSettingDto
+  UpdateSystemSettingDto,
+  UpdateUserProfileDto
 } from "./dto";
 
 @ApiTags("admin")
@@ -23,7 +33,47 @@ import {
 @PlatformRoles("SUPER_ADMIN")
 @Controller("admin")
 export class AdminController {
-  constructor(private readonly adminService: AdminService) {}
+  constructor(
+    private readonly adminService: AdminService,
+    private readonly ops: AdminOpsService,
+    private readonly assistant: ProductionAssistantService,
+    private readonly assistantSchedule: AssistantScheduleService
+  ) {}
+
+  // 공연별 준비 현황(참여자·대본·영상·큐·일정)과 확인이 필요한 일.
+  @Get("overview")
+  overview() {
+    return this.ops.overview();
+  }
+
+  @Post("production-assistant")
+  @UseGuards(RateLimitGuard)
+  @RateLimit({ name: "admin.production-assistant", defaultLimit: 10, defaultWindowMs: 60_000, keyMode: "user-or-ip" })
+  async askProductionAssistant(
+    @Body() dto: ProductionAssistantDto,
+    @CurrentUser() user: RequestUser,
+    @Res({ passthrough: true }) res: Response
+  ) {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    res.once("close", abort);
+    try {
+      return await this.assistant.ask(dto.question.trim(), user, controller.signal, dto.eventId, dto.previousRequest?.trim());
+    } finally {
+      res.off("close", abort);
+    }
+  }
+
+  @Post("production-assistant/schedule-confirm")
+  confirmAssistantSchedule(@Body() dto: ConfirmAssistantScheduleDto, @CurrentUser() user: RequestUser) {
+    return this.assistantSchedule.confirm(dto.approvalToken, user);
+  }
+
+  // AI·저장소(R2 CORS 포함)·메일·DB 상태 점검. refresh=1이면 캐시를 쓰지 않는다.
+  @Get("system-health")
+  systemHealth(@Query("refresh") refresh?: string) {
+    return this.ops.health(refresh === "1");
+  }
 
   @Get()
   getConsole(@CurrentUser() user: RequestUser) {
@@ -57,6 +107,11 @@ export class AdminController {
   @Get("users")
   listUsers(@Query() query: AdminListQueryDto) {
     return this.adminService.listUsers(query);
+  }
+
+  @Get("members/search")
+  searchMembers(@Query() query: AdminListQueryDto) {
+    return this.adminService.searchMembers(query);
   }
 
   @Get("members")
@@ -93,9 +148,24 @@ export class AdminController {
     return this.adminService.changeUserStatus(userId, dto, user);
   }
 
+  @Patch("users/:userId")
+  updateUserProfile(@Param("userId") userId: string, @Body() dto: UpdateUserProfileDto, @CurrentUser() user: RequestUser) {
+    return this.adminService.updateUserProfile(userId, dto, user);
+  }
+
+  @Post("users/:userId/password")
+  setUserPassword(@Param("userId") userId: string, @Body() dto: SetUserPasswordDto, @CurrentUser() user: RequestUser) {
+    return this.adminService.setUserPassword(userId, dto, user);
+  }
+
   @Post("users/:userId/profile-request")
   requestProfile(@Param("userId") userId: string, @Body() dto: ProfileRequestDto, @CurrentUser() user: RequestUser) {
     return this.adminService.requestProfile(userId, dto, user);
+  }
+
+  @Get("activity-logs/search")
+  searchActivityLogs(@Query() query: AdminListQueryDto) {
+    return this.adminService.searchActivityLogs(query);
   }
 
   @Get("activity-logs")

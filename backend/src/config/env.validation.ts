@@ -1,3 +1,4 @@
+import { readR2Settings, resolveStorageDriver } from "../assets/r2-storage";
 type EnvConfig = Record<string, string | undefined>;
 
 const DEFAULT_API_PREFIX = "/api/v1";
@@ -27,7 +28,11 @@ const RATE_LIMIT_DEFAULTS = [
   ["RATE_LIMIT_AI_EXTRACT_LIMIT", "20", 1, 10000],
   ["RATE_LIMIT_AI_EXTRACT_WINDOW_MS", DEFAULT_RATE_LIMIT_WINDOW_MS, 1000, 86400000],
   ["RATE_LIMIT_AI_APPLY_LIMIT", "10", 1, 10000],
-  ["RATE_LIMIT_AI_APPLY_WINDOW_MS", DEFAULT_RATE_LIMIT_WINDOW_MS, 1000, 86400000]
+  ["RATE_LIMIT_AI_APPLY_WINDOW_MS", DEFAULT_RATE_LIMIT_WINDOW_MS, 1000, 86400000],
+  ["RATE_LIMIT_AI_MATCH_LIMIT", "10", 1, 10000],
+  ["RATE_LIMIT_AI_MATCH_WINDOW_MS", DEFAULT_RATE_LIMIT_WINDOW_MS, 1000, 86400000],
+  ["RATE_LIMIT_PASSWORD_CHANGE_LIMIT", "10", 1, 10000],
+  ["RATE_LIMIT_PASSWORD_CHANGE_WINDOW_MS", DEFAULT_RATE_LIMIT_WINDOW_MS, 1000, 86400000]
 ] as const;
 
 export function validateEnvironment(config: EnvConfig) {
@@ -63,12 +68,14 @@ export function validateEnvironment(config: EnvConfig) {
   next.AUTH_EXPOSE_DEV_RESET_URL = normalizeBoolean(config.AUTH_EXPOSE_DEV_RESET_URL || "false", "AUTH_EXPOSE_DEV_RESET_URL");
   next.RATE_LIMIT_TRUST_PROXY = normalizeBoolean(config.RATE_LIMIT_TRUST_PROXY || "false", "RATE_LIMIT_TRUST_PROXY");
   next.MAIL_TRANSPORT = normalizeMailTransport(config.MAIL_TRANSPORT || DEFAULT_MAIL_TRANSPORT, isProduction);
+  next.MAIL_SENDING_ENABLED = normalizeBoolean(config.MAIL_SENDING_ENABLED ?? "true", "MAIL_SENDING_ENABLED");
+  const mailEnabled = next.MAIL_SENDING_ENABLED === "true";
   next.RESEND_API_KEY = config.RESEND_API_KEY?.trim();
   next.RESEND_FROM_EMAIL = config.RESEND_FROM_EMAIL?.trim();
   next.RESEND_REPLY_TO = config.RESEND_REPLY_TO?.trim();
   next.MAIL_HOST = (config.MAIL_HOST || DEFAULT_MAIL_HOST).trim();
   next.MAIL_PORT = normalizePort(config.MAIL_PORT || DEFAULT_MAIL_PORT);
-  next.MAIL_FROM = (next.MAIL_TRANSPORT === "resend" ? next.RESEND_FROM_EMAIL : config.MAIL_FROM || DEFAULT_MAIL_FROM)?.trim();
+  next.MAIL_FROM = (next.MAIL_TRANSPORT === "resend" ? next.RESEND_FROM_EMAIL || (!mailEnabled ? DEFAULT_MAIL_FROM : undefined) : config.MAIL_FROM || DEFAULT_MAIL_FROM)?.trim();
   next.MAIL_SECURE = normalizeBoolean(config.MAIL_SECURE || "false", "MAIL_SECURE");
   next.MAIL_WORKER_BATCH_SIZE = normalizeInteger(config.MAIL_WORKER_BATCH_SIZE || "25", "MAIL_WORKER_BATCH_SIZE", 1, 100);
   next.MAIL_WORKER_INTERVAL_MS = normalizeInteger(config.MAIL_WORKER_INTERVAL_MS || "30000", "MAIL_WORKER_INTERVAL_MS", 1000, 86400000);
@@ -78,7 +85,7 @@ export function validateEnvironment(config: EnvConfig) {
     30000,
     86400000
   );
-  next.MAIL_WORKER_RETRY_DELAY_MS = normalizeInteger(config.MAIL_WORKER_RETRY_DELAY_MS || "300000", "MAIL_WORKER_RETRY_DELAY_MS", 1000, 86400000);
+  next.MAIL_WORKER_RETRY_DELAY_MS = normalizeInteger(config.MAIL_WORKER_RETRY_DELAY_MS || "60000", "MAIL_WORKER_RETRY_DELAY_MS", 1000, 86400000);
   next.MAIL_WORKER_MAX_ATTEMPTS = normalizeInteger(config.MAIL_WORKER_MAX_ATTEMPTS || "3", "MAIL_WORKER_MAX_ATTEMPTS", 1, 10);
   next.MAIL_DIGEST_WINDOW_MS = normalizeInteger(config.MAIL_DIGEST_WINDOW_MS || "3600000", "MAIL_DIGEST_WINDOW_MS", 60000, 86400000);
   next.ATTENDANCE_REMINDER_LOOKAHEAD_HOURS = normalizeInteger(
@@ -89,6 +96,22 @@ export function validateEnvironment(config: EnvConfig) {
   );
   next.SIGNED_URL_TTL = normalizeInteger(config.SIGNED_URL_TTL || "600", "SIGNED_URL_TTL", 60, 86400);
   next.ASSET_OBJECT_DIR = normalizeObjectDir(config.ASSET_OBJECT_DIR === undefined ? ".asset-objects" : config.ASSET_OBJECT_DIR);
+  // 업로드 저장소: local(서버 디스크, 로컬 개발) 또는 r2(Cloudflare R2, 웹 운영). 정하지 않으면 R2 정보가 완전할 때 r2.
+  const explicitStorage = config.ASSET_STORAGE?.trim().toLowerCase();
+  if (explicitStorage && !["local", "r2"].includes(explicitStorage)) throw new Error("ASSET_STORAGE must be local or r2.");
+  next.ASSET_STORAGE = resolveStorageDriver(config);
+  next.UPLOAD_URL_TTL = normalizeInteger(config.UPLOAD_URL_TTL || "3600", "UPLOAD_URL_TTL", 60, 86400);
+  if (next.ASSET_STORAGE === "r2") {
+    const r2 = readR2Settings(config); // 빠진 값이 있으면 어떤 변수인지 알려 주며 실패한다.
+    next.R2_PROJECT_NAME = r2!.projectName;
+    next.R2_LEGACY_PROJECT_NAMES = r2!.legacyProjectNames?.join(",") ?? "";
+    // 붙여 넣다 생기는 흔한 실수를 시작할 때 바로 알린다(예시 값 "...", 변수 이름이 값에 섞임 등).
+    if (!/^[0-9a-f]{32}$/i.test(r2!.accountId)) throw new Error("R2_ACCOUNT_ID must be the 32-character Cloudflare account id.");
+    if (!/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(r2!.bucket)) throw new Error("R2_BUCKET must be a bucket name (3-63 chars: lowercase letters, numbers, hyphens).");
+    for (const [key, value] of [["R2_ACCESS_KEY_ID", r2!.accessKeyId], ["R2_SECRET_ACCESS_KEY", r2!.secretAccessKey]]) {
+      if (value.length < 16 || value.includes("...")) throw new Error(`${key} looks like a placeholder; paste the real R2 API token value.`);
+    }
+  }
   for (const [key, fallback, min, max] of RATE_LIMIT_DEFAULTS) {
     next[key] = normalizeInteger(config[key] || fallback, key, min, max);
   }
@@ -101,17 +124,17 @@ export function validateEnvironment(config: EnvConfig) {
     requireEnv(next, "MAIL_HOST");
   }
   if (next.MAIL_TRANSPORT === "resend") {
-    if (!next.RESEND_API_KEY) {
+    if (mailEnabled && !next.RESEND_API_KEY) {
       throw new Error("RESEND_API_KEY is required when MAIL_TRANSPORT=resend.");
     }
-    if (!next.RESEND_FROM_EMAIL) {
+    if (mailEnabled && !next.RESEND_FROM_EMAIL) {
       throw new Error("RESEND_FROM_EMAIL is required when MAIL_TRANSPORT=resend.");
     }
-    assertEmailAddress("RESEND_FROM_EMAIL", next.RESEND_FROM_EMAIL);
+    if (next.RESEND_FROM_EMAIL) assertEmailAddress("RESEND_FROM_EMAIL", next.RESEND_FROM_EMAIL);
     if (next.RESEND_REPLY_TO) {
       assertEmailAddress("RESEND_REPLY_TO", next.RESEND_REPLY_TO);
     }
-    if (isProduction) {
+    if (isProduction && next.RESEND_API_KEY) {
       assertResendCredential(next.RESEND_API_KEY);
     }
   }
@@ -133,7 +156,7 @@ export function validateEnvironment(config: EnvConfig) {
     if (next.AUTH_EXPOSE_DEV_RESET_URL === "true") {
       throw new Error("AUTH_EXPOSE_DEV_RESET_URL must be false in production.");
     }
-    if (!next.ASSET_OBJECT_DIR?.startsWith("/")) {
+    if (next.ASSET_STORAGE !== "r2" && !next.ASSET_OBJECT_DIR?.startsWith("/")) {
       throw new Error("ASSET_OBJECT_DIR must be an absolute path in production.");
     }
   }
@@ -177,7 +200,7 @@ function assertEmailAddress(key: string, value: string) {
   const trimmed = value.trim();
   const displayNameMatch = trimmed.match(/^[^<>]+<([^<>]+)>$/);
   const mailbox = displayNameMatch?.[1]?.trim() || trimmed;
-  if (!/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(mailbox)) {
+  if (/[\r\n]/.test(value) || !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(mailbox)) {
     throw new Error(`${key} must be a valid email address.`);
   }
 }
@@ -210,7 +233,7 @@ function normalizeAbsoluteUrl(value: string, key: string) {
   const trimmed = value.trim().replace(/\/+$/, "");
   try {
     const url = new URL(trimmed);
-    if (url.protocol !== "http:" && url.protocol !== "https:") {
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password || url.search || url.hash) {
       throw new Error("unsupported protocol");
     }
     return trimmed;
@@ -236,6 +259,7 @@ function normalizeCorsOrigins(value: string, isProduction: boolean) {
       continue;
     }
     const normalized = normalizeAbsoluteUrl(origin, "CORS_ORIGINS");
+    if (new URL(normalized).pathname !== "/") throw new Error("CORS_ORIGINS must contain origins without path segments.");
     if (isProduction && !normalized.startsWith("https://")) {
       throw new Error("CORS_ORIGINS must use https origins in production.");
     }

@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node scripts/verify-changed.mjs:*)",
+      "Bash(npm run verify:changed:*)",
+      "Bash(npm run check)",
+      "Bash(npm run test)",
+      "Bash(git diff:*)",
+      "Bash(git status:*)"
+    ]
+  }
+}
