@@ -44,7 +44,7 @@ export class ProductionMembersService {
       }),
       this.prisma.user.findMany({
         where: { id: { in: userIds } },
-        select: { id: true, email: true, name: true }
+        select: { id: true, email: true, name: true, status: true }
       })
     ]);
     if (!production) {
@@ -53,10 +53,21 @@ export class ProductionMembersService {
     if (users.length !== userIds.length) {
       throw new BadRequestException("존재하지 않는 사용자가 포함되어 있어요");
     }
+    const inactive = users.filter((candidate) => candidate.status !== "ACTIVE");
+    if (inactive.length) {
+      throw new BadRequestException(`비활성·차단 계정은 멤버로 추가할 수 없어요: ${inactive.map((candidate) => candidate.name).join(", ")}`);
+    }
 
     const results = await this.prisma.$transaction(async (tx) => {
       const memberships = [];
       for (const userId of userIds) {
+        const existing = await tx.membership.findUnique({
+          where: { userId_productionId: { userId, productionId } },
+          select: { id: true }
+        });
+        if (existing) {
+          await this.access.assertProducerRemains(tx, productionId, existing.id, roles);
+        }
         const membership = await tx.membership.upsert({
           where: { userId_productionId: { userId, productionId } },
           update: { primaryRole: dto.primaryRole },
@@ -91,7 +102,7 @@ export class ProductionMembersService {
       });
 
       return memberships;
-    });
+    }, { timeout: 20000 });
 
     if (dto.sendNotification !== false) {
       const userById = new Map(users.map((matchedUser) => [matchedUser.id, matchedUser]));
@@ -352,7 +363,7 @@ export class ProductionMembersService {
             recipientName: removed.userName,
             roles: removed.roles,
             actorName: user.name,
-            productionsUrl: `${this.productionNotifications.appPublicUrl()}/productions`
+            productionsUrl: `${this.productionNotifications.appPublicUrl()}/app`
           }),
           metadata: {
             ...payload,
@@ -375,7 +386,7 @@ export class ProductionMembersService {
     };
   }
 
-  async createInvitation(productionId: string, dto: CreateInvitationDto) {
+  async createInvitation(productionId: string, dto: CreateInvitationDto, user?: RequestUser) {
     const production = await this.prisma.production.findUnique({
       where: { id: productionId },
       select: { id: true, title: true }
@@ -388,6 +399,14 @@ export class ProductionMembersService {
     if (!email) {
       throw new BadRequestException("초대 이메일을 입력해 주세요");
     }
+
+    const alreadyMember = await this.prisma.membership.findFirst({ where: { productionId, user: { email } }, select: { id: true } });
+    if (alreadyMember) {
+      throw new BadRequestException("이미 이 공연의 멤버예요. 멤버 목록에서 역할을 바꿔 주세요");
+    }
+
+    // 같은 사람에게 다시 초대하면 이전 초대는 취소한다(유효한 링크는 한 개).
+    await this.prisma.invitation.updateMany({ where: { productionId, email, status: "PENDING" }, data: { status: "REVOKED" } });
 
     const invitation = await this.prisma.invitation.create({
       data: {
@@ -420,6 +439,8 @@ export class ProductionMembersService {
         fromEmail: this.mail.fromEmail()
       }
     });
+
+    if (user) await this.prisma.activityLog.create({ data: { productionId, actorId: user.id, action: "production.invitation.create", entity: "Invitation", entityId: invitation.id, afterJson: { email: invitation.email, role: invitation.role } } });
 
     return {
       id: invitation.id,
@@ -472,23 +493,34 @@ export class ProductionMembersService {
       throw new ForbiddenException("초대받은 이메일 계정으로 로그인해 주세요");
     }
 
-    const membership = await this.prisma.membership.upsert({
-      where: { userId_productionId: { userId: user.id, productionId: invitation.productionId } },
-      update: {},
-      create: {
-        userId: user.id,
-        productionId: invitation.productionId,
-        primaryRole: invitation.role
+    const membership = await this.prisma.$transaction(async (tx) => {
+      // 동시 수락은 한 요청만 선점하고, 멤버 생성 실패 시 초대 상태도 함께 되돌린다.
+      const claimed = await tx.invitation.updateMany({
+        where: { id: invitation.id, status: "PENDING" },
+        data: { status: "ACCEPTED" }
+      });
+      if (claimed.count !== 1) {
+        throw new BadRequestException("이미 처리된 초대예요");
       }
+
+      const member = await tx.membership.upsert({
+        where: { userId_productionId: { userId: user.id, productionId: invitation.productionId } },
+        update: {},
+        create: {
+          userId: user.id,
+          productionId: invitation.productionId,
+          primaryRole: invitation.role
+        }
+      });
+
+      await tx.membershipRole.upsert({
+        where: { membershipId_role: { membershipId: member.id, role: invitation.role } },
+        update: {},
+        create: { membershipId: member.id, role: invitation.role }
+      });
+      return member;
     });
 
-    await this.prisma.membershipRole.upsert({
-      where: { membershipId_role: { membershipId: membership.id, role: invitation.role } },
-      update: {},
-      create: { membershipId: membership.id, role: invitation.role }
-    });
-
-    await this.prisma.invitation.update({ where: { id: invitation.id }, data: { status: "ACCEPTED" } });
     await this.notifications.createNotification({
       userId: user.id,
       productionId: invitation.productionId,
@@ -506,5 +538,23 @@ export class ProductionMembersService {
       role: invitation.role,
       next: `/app/p/${invitation.productionId}`
     };
+  }
+
+  async revokeInvitation(productionId: string, invitationId: string, user?: RequestUser) {
+    const invitation = await this.prisma.invitation.findFirst({ where: { id: invitationId, productionId } });
+    if (!invitation) throw new NotFoundException("초대를 찾을 수 없어요");
+    if (invitation.status !== "PENDING") throw new BadRequestException("이미 처리된 초대예요");
+    await this.prisma.invitation.update({ where: { id: invitation.id }, data: { status: "REVOKED" } });
+    if (user) await this.prisma.activityLog.create({ data: { productionId, actorId: user.id, action: "production.invitation.revoke", entity: "Invitation", entityId: invitation.id, afterJson: { email: invitation.email } } });
+    return { id: invitation.id, status: "REVOKED" };
+  }
+
+  async listInvitations(productionId: string) {
+    const rows = await this.prisma.invitation.findMany({
+      where: { productionId, status: "PENDING", expiresAt: { gt: new Date() } },
+      orderBy: { createdAt: "desc" },
+      take: 100
+    });
+    return rows.map((row) => ({ id: row.id, email: row.email, role: row.role, createdAt: row.createdAt, expiresAt: row.expiresAt, inviteUrl: `${this.productionNotifications.appPublicUrl()}/invite/${row.token}` }));
   }
 }

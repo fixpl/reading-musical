@@ -20,8 +20,7 @@
   );
 
   async function handleLogout() {
-    await logout();
-    await goto("/login");
+    if (await logout()) await goto("/login");
   }
 </script>
 
@@ -70,7 +69,7 @@
         </DropdownMenu.Item>
         <DropdownMenu.Item onclick={toggleMode}>
           <MoonIcon />
-          다크 모드 전환
+          화면 밝기 바꾸기
         </DropdownMenu.Item>
         <DropdownMenu.Separator />
         <DropdownMenu.Item onclick={handleLogout}>

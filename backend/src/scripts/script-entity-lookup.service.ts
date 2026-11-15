@@ -9,7 +9,7 @@ export class ScriptEntityLookupService {
   constructor(private readonly prisma: PrismaService) {}
 
   async assertScript(productionId: string, scriptId: string) {
-    const script = await this.prisma.script.findFirst({ where: { id: scriptId, productionId }, select: { id: true } });
+    const script = await this.prisma.script.findFirst({ where: { id: scriptId, productionId, deletedAt: null }, select: { id: true } });
     if (!script) {
       throw new NotFoundException("대본을 찾을 수 없어요");
     }
@@ -18,7 +18,7 @@ export class ScriptEntityLookupService {
 
   async assertAct(productionId: string, actId: string) {
     const act = await this.prisma.act.findFirst({
-      where: { id: actId, script: { productionId } },
+      where: { id: actId, script: { productionId, deletedAt: null } },
       select: { id: true, scriptId: true }
     });
     if (!act) {
@@ -29,7 +29,7 @@ export class ScriptEntityLookupService {
 
   async assertScene(productionId: string, sceneId: string) {
     const scene = await this.prisma.scene.findFirst({
-      where: { id: sceneId, act: { script: { productionId } } },
+      where: { id: sceneId, act: { script: { productionId, deletedAt: null } } },
       select: { id: true, actId: true }
     });
     if (!scene) {
@@ -40,8 +40,8 @@ export class ScriptEntityLookupService {
 
   async assertBlock(productionId: string, blockId: string) {
     const block = await this.prisma.sceneBlock.findFirst({
-      where: { id: blockId, scene: { act: { script: { productionId } } } },
-      select: { id: true, sceneId: true, order: true }
+      where: { id: blockId, scene: { act: { script: { productionId, deletedAt: null } } } },
+      select: { id: true, sceneId: true, order: true, updatedAt: true }
     });
     if (!block) {
       throw new NotFoundException("대본 블록을 찾을 수 없어요");
@@ -54,7 +54,7 @@ export class ScriptEntityLookupService {
       where: {
         id: annotationId,
         anchorBlockId: blockId,
-        anchorBlock: { scene: { act: { script: { productionId } } } }
+        anchorBlock: { scene: { act: { script: { productionId, deletedAt: null } } } }
       },
       select: { id: true, authorId: true, isShared: true }
     });

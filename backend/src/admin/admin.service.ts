@@ -1,5 +1,7 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import * as bcrypt from "bcryptjs";
+import { randomBytes } from "node:crypto";
 import { AttendanceStatus,
   AdminSettingValueType,
   OrganizationStatus,
@@ -18,9 +20,11 @@ import {
   CreateChecklistTemplateDto,
   CreateOrganizationDto,
   ProfileRequestDto,
+  SetUserPasswordDto,
   UpdateChecklistTemplateDto,
   UpdateOrganizationDto,
-  UpdateSystemSettingDto
+  UpdateSystemSettingDto,
+  UpdateUserProfileDto
 } from "./dto";
 
 const DEFAULT_SETTINGS: Array<{
@@ -36,6 +40,35 @@ const DEFAULT_SETTINGS: Array<{
   { key: "notification.emailDigestPerHour", value: 1, valueType: AdminSettingValueType.NUMBER, description: "이메일 digest 시간당 발송 횟수" },
   { key: "maintenance.notice", value: "", valueType: AdminSettingValueType.STRING, description: "전체 운영 공지" }
 ];
+
+const MEMBER_LIST_SELECT = {
+  id: true,
+  organizationId: true,
+  organization: { select: { id: true, name: true, status: true } },
+  email: true,
+  name: true,
+  phone: true,
+  profileType: true,
+  profileDetails: true,
+  profileComplete: true,
+  status: true,
+  platformRole: true,
+  emailNotify: true,
+  createdAt: true,
+  updatedAt: true,
+  memberships: {
+    where: { production: { deletedAt: null } },
+    select: {
+      id: true,
+      primaryRole: true,
+      production: { select: { id: true, title: true, organizationId: true } },
+      roles: { select: { role: true } },
+      staffAssignments: { select: { discipline: true, customLabel: true, isLead: true } }
+    },
+    orderBy: { createdAt: "desc" }
+  },
+  _count: { select: { memberships: { where: { production: { deletedAt: null } } }, assets: true } }
+} satisfies Prisma.UserSelect;
 
 @Injectable()
 export class AdminService {
@@ -332,7 +365,7 @@ export class AdminService {
     }
 
     const memberships = await this.prisma.membership.findMany({
-      where: { userId },
+      where: { userId, production: { deletedAt: null } },
       orderBy: { createdAt: "desc" },
       include: {
         production: { select: { id: true, title: true, currentPhase: true, visibility: true } },
@@ -341,7 +374,7 @@ export class AdminService {
     });
 
     const upcomingEvents = await this.prisma.scheduleEvent.findMany({
-      where: { endAt: { gte: new Date() }, attendances: { some: { membership: { userId } } } },
+      where: { production: { deletedAt: null }, endAt: { gte: new Date() }, attendances: { some: { membership: { userId } } } },
       orderBy: { startAt: "asc" },
       take: 20,
       select: {
@@ -430,34 +463,38 @@ export class AdminService {
       },
       orderBy: { createdAt: "desc" },
       take: this.take(query.take),
-      select: {
-        id: true,
-        organizationId: true,
-        organization: { select: { id: true, name: true, status: true } },
-        email: true,
-        name: true,
-        phone: true,
-        profileType: true,
-        profileDetails: true,
-        profileComplete: true,
-        status: true,
-        platformRole: true,
-        emailNotify: true,
-        createdAt: true,
-        updatedAt: true,
-        memberships: {
-          select: {
-            id: true,
-            primaryRole: true,
-            production: { select: { id: true, title: true, organizationId: true } },
-            roles: { select: { role: true } },
-            staffAssignments: { select: { discipline: true, customLabel: true, isLead: true } }
-          },
-          orderBy: { createdAt: "desc" }
-        },
-        _count: { select: { memberships: true, assets: true } }
-      }
+      select: MEMBER_LIST_SELECT
     });
+  }
+
+  /**
+   * 회원 검색(페이지 단위) — 가입한 사람 가운데 누구를 어느 공연에 배정할지 고를 때 쓴다.
+   * assigned=no 는 아직 어느 공연에도 배정되지 않은 회원(배정 대기)이다.
+   */
+  async searchMembers(query: AdminListQueryDto = {}) {
+    const take = Math.min(Math.max(query.take ?? 30, 1), 100);
+    const skip = Math.max(query.skip ?? 0, 0);
+    const q = query.q?.trim();
+    const base: Prisma.UserWhereInput = {
+      organizationId: query.organizationId || undefined,
+      profileType: query.profileType,
+      profileComplete: query.profileComplete,
+      ...(q ? { OR: [{ email: { contains: q, mode: "insensitive" } }, { name: { contains: q, mode: "insensitive" } }, { phone: { contains: q, mode: "insensitive" } }] } : {})
+    };
+    const where: Prisma.UserWhereInput = {
+      ...base,
+      status: this.parseUserStatus(query.status),
+      ...(query.assigned === "no" ? { memberships: { none: { production: { deletedAt: null } } } } : query.assigned === "yes" ? { memberships: { some: { production: { deletedAt: null } } } } : {})
+    };
+    const [total, items, unassigned, incomplete, blocked, all] = await Promise.all([
+      this.prisma.user.count({ where }),
+      this.prisma.user.findMany({ where, orderBy: { createdAt: "desc" }, skip, take, select: MEMBER_LIST_SELECT }),
+      this.prisma.user.count({ where: { ...base, memberships: { none: { production: { deletedAt: null } } }, status: UserStatus.ACTIVE } }),
+      this.prisma.user.count({ where: { ...base, profileComplete: false } }),
+      this.prisma.user.count({ where: { ...base, status: UserStatus.BLOCKED } }),
+      this.prisma.user.count({ where: base })
+    ]);
+    return { total, skip, take, items, counts: { all, unassigned, incomplete, blocked } };
   }
 
   async listOrgMembers(query: AdminListQueryDto, user: RequestUser) {
@@ -516,6 +553,96 @@ export class AdminService {
     return after;
   }
 
+  async updateUserProfile(userId: string, dto: UpdateUserProfileDto, actor: RequestUser) {
+    const profileSelect = {
+      ...this.userAuditSelect(),
+      phone: true,
+      birthDate: true,
+      address: true,
+      gender: true,
+      profileDetails: true
+    } satisfies Prisma.UserSelect;
+
+    const before = await this.prisma.user.findUnique({ where: { id: userId }, select: profileSelect });
+    if (!before) {
+      throw new NotFoundException("회원을 찾을 수 없어요");
+    }
+
+    const after = await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        name: dto.name?.trim() || undefined,
+        phone: dto.phone === undefined ? undefined : dto.phone.trim() || null,
+        birthDate: dto.birthDate === undefined ? undefined : dto.birthDate ? new Date(dto.birthDate) : null,
+        address: dto.address === undefined ? undefined : dto.address.trim() || null,
+        gender: dto.gender,
+        profileType: dto.profileType,
+        profileDetails: dto.profileDetails === undefined ? undefined : (dto.profileDetails as Prisma.InputJsonValue)
+      },
+      select: profileSelect
+    });
+
+    await this.log({
+      actorId: actor.id,
+      action: "admin.user.profile.update",
+      entity: "User",
+      entityId: userId,
+      organizationId: after.organizationId ?? undefined,
+      reason: "운영자 정보 수정",
+      before,
+      after
+    });
+
+    return after;
+  }
+
+  async setUserPassword(userId: string, dto: SetUserPasswordDto, actor: RequestUser) {
+    if (userId === actor.id) {
+      throw new BadRequestException("본인 비밀번호는 이 화면에서 바꿀 수 없어요. 비밀번호 찾기를 이용해 주세요");
+    }
+    const target = await this.prisma.user.findUnique({ where: { id: userId }, select: { id: true, organizationId: true } });
+    if (!target) {
+      throw new NotFoundException("회원을 찾을 수 없어요");
+    }
+
+    const password = dto.password?.trim() || this.generateTempPassword();
+
+    await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id: userId },
+        data: { passwordHash: await bcrypt.hash(password, 12), failedLoginCount: 0, lockedUntil: null }
+      }),
+      this.prisma.authSession.updateMany({
+        where: { userId, revokedAt: null },
+        data: { revokedAt: new Date(), revokedReason: "ADMIN_PASSWORD_RESET" }
+      })
+    ]);
+
+    await this.log({
+      actorId: actor.id,
+      action: dto.password?.trim() ? "admin.user.password.set" : "admin.user.password.generate",
+      entity: "User",
+      entityId: userId,
+      organizationId: target.organizationId ?? undefined,
+      reason: "운영자 비밀번호 재설정"
+    });
+
+    return { password };
+  }
+
+  // 문자/숫자 혼합을 보장하는 임시 비밀번호 — 회원가입 비밀번호 정책과 동일 기준을 통과한다.
+  private generateTempPassword(): string {
+    const letters = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz";
+    const digits = "23456789";
+    const pick = (charset: string, count: number) => Array.from(randomBytes(count)).map((b) => charset[b % charset.length]);
+    const chars = [...pick(letters, 6), ...pick(digits, 4)];
+    for (let i = chars.length - 1; i > 0; i--) {
+      const j = randomBytes(1)[0] % (i + 1);
+      [chars[i], chars[j]] = [chars[j], chars[i]];
+    }
+    return chars.join("");
+  }
+
   async requestProfile(userId: string, dto: ProfileRequestDto, actor: RequestUser) {
     return this.requestProfileInternal(userId, dto, actor, "admin.user.profile_request");
   }
@@ -554,7 +681,7 @@ export class AdminService {
         reason: dto.reason,
         message: dto.message,
         actorName: actor.name,
-        settingsUrl: `${this.appPublicUrl()}/settings`
+        settingsUrl: `${this.appPublicUrl()}/app/profile`
       }),
       metadata: {
         reason: dto.reason,
@@ -632,6 +759,54 @@ export class AdminService {
       organization: log.organizationId ? (organizationMap.get(log.organizationId) ?? null) : null,
       production: log.productionId ? (productionMap.get(log.productionId) ?? null) : null
     }));
+  }
+
+  /**
+   * 활동 기록 검색(페이지 단위). 검색어(q)는 동작·대상·이유·이름·이메일에 걸리고, 기간(from·to)·공연·동작으로 좁힐 수 있다.
+   * 돌려주는 값: 해당 페이지 항목, 조건에 맞는 전체 개수, 필터에 쓸 동작 종류와 공연 목록.
+   */
+  async searchActivityLogs(query: AdminListQueryDto = {}) {
+    const take = Math.min(Math.max(query.take ?? 30, 1), 100);
+    const skip = Math.max(query.skip ?? 0, 0);
+    const q = query.q?.trim();
+    const date = (value?: string, endOfDay = false) => {
+      if (!value) return undefined;
+      const parsed = new Date(/^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T${endOfDay ? "23:59:59.999" : "00:00:00.000"}+09:00` : value);
+      return Number.isNaN(parsed.getTime()) ? undefined : parsed;
+    };
+    const from = date(query.from), to = date(query.to, true);
+    // 이름·이메일로도 찾을 수 있게 검색어와 맞는 회원 id를 먼저 구한다.
+    const actorIds = q ? (await this.prisma.user.findMany({ where: { OR: [{ name: { contains: q, mode: "insensitive" } }, { email: { contains: q, mode: "insensitive" } }] }, select: { id: true }, take: 50 })).map((user) => user.id) : [];
+    const where: Prisma.ActivityLogWhereInput = {
+      productionId: query.productionId || undefined,
+      action: query.action ? { contains: query.action.trim(), mode: "insensitive" } : undefined,
+      actorId: query.actorId || undefined,
+      createdAt: from || to ? { gte: from, lte: to } : undefined,
+      ...(q ? { OR: [
+        { action: { contains: q, mode: "insensitive" } }, { entity: { contains: q, mode: "insensitive" } }, { entityId: { contains: q, mode: "insensitive" } }, { reason: { contains: q, mode: "insensitive" } },
+        ...(actorIds.length ? [{ actorId: { in: actorIds } }] : [])
+      ] } : {})
+    };
+    const [total, rows, actions, productions] = await Promise.all([
+      this.prisma.activityLog.count({ where }),
+      this.prisma.activityLog.findMany({ where, orderBy: { createdAt: "desc" }, skip, take }),
+      this.prisma.activityLog.groupBy({ by: ["action"], _count: { _all: true }, orderBy: { _count: { action: "desc" } }, take: 80 }),
+      this.prisma.production.findMany({ where: { deletedAt: null }, select: { id: true, title: true }, orderBy: { title: "asc" }, take: 200 })
+    ]);
+    const ids = [...new Set(rows.map((row) => row.actorId))];
+    const prodIds = [...new Set(rows.map((row) => row.productionId).filter(Boolean))] as string[];
+    const [actors, titles] = await Promise.all([
+      this.prisma.user.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, email: true } }),
+      this.prisma.production.findMany({ where: { id: { in: prodIds } }, select: { id: true, title: true } })
+    ]);
+    const actorMap = new Map(actors.map((actor) => [actor.id, actor]));
+    const titleMap = new Map(titles.map((production) => [production.id, production]));
+    return {
+      total, skip, take,
+      items: rows.map((row) => ({ ...row, actor: actorMap.get(row.actorId) ?? null, production: row.productionId ? titleMap.get(row.productionId) ?? null : null })),
+      actions: actions.map((row) => ({ action: row.action, count: row._count._all })),
+      productions
+    };
   }
 
   async listOrgActivityLogs(query: AdminListQueryDto = {}, user: RequestUser) {
@@ -863,7 +1038,7 @@ export class AdminService {
       this.getActorOrganizationId(actor),
       this.prisma.user.findUnique({
         where: { id: userId },
-        select: { organizationId: true }
+        select: { organizationId: true, platformRole: true }
       })
     ]);
 
@@ -872,6 +1047,9 @@ export class AdminService {
     }
     if (target.organizationId !== organizationId) {
       throw new ForbiddenException("다른 단체 회원은 관리할 수 없어요");
+    }
+    if (target.platformRole === "SUPER_ADMIN" || target.platformRole === "ORG_ADMIN") {
+      throw new ForbiddenException("관리자 계정은 단체 관리자가 변경할 수 없어요");
     }
   }
 

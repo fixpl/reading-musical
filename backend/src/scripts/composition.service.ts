@@ -1,12 +1,15 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, Optional, ServiceUnavailableException } from "@nestjs/common";
 import { Prisma, ProductionRole } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 import { AssetsService } from "../assets/assets.service";
 import { isProductionAdmin } from "../common/access/is-production-admin";
 import type { RequestUser } from "../common/types/request-user";
 import { PrismaService } from "../prisma/prisma.service";
-import { AttachReferenceFilesDto, ApplyCompositionImportDto, CompositionRevisionDto, PreviewCompositionImportDto, ReorderSectionsDto, ReviewedSectionDto, WriteCompositionMediaDto, WriteSectionDto, type MediaSlot, type SectionKind } from "./composition.dto";
+import { SyncSectionDto, AttachReferenceFilesDto, ApplyCompositionImportDto, CompositionRevisionDto, PreviewCompositionImportDto, ReorderSectionsDto, ReviewedSectionDto, WriteCompositionMediaDto, WriteSectionDto, MAX_COMPOSITION_MS, type MediaSlot, type SectionKind } from "./composition.dto";
 import { parseCompositionText } from "./composition-parser";
+import { sceneDurationMs } from "./duration-estimate";
+import { SectionSyncService } from "./section-sync.service";
+import { blocksToText } from "./section-text";
 import { CompositionLayoutError, resolveComposition } from "./composition-timing";
 
 const EDIT_ROLES: ProductionRole[] = [ProductionRole.PRODUCER, ProductionRole.DIRECTOR];
@@ -21,7 +24,7 @@ type Tx = Prisma.TransactionClient;
 
 @Injectable()
 export class CompositionService {
-  constructor(private readonly prisma: PrismaService, private readonly assets: AssetsService) {}
+  constructor(private readonly prisma: PrismaService, private readonly assets: AssetsService, @Optional() private readonly sync?: SectionSyncService) {}
 
   async board(productionId: string, user: RequestUser) {
     const canEdit = await this.assertAccess(productionId, user);
@@ -39,8 +42,10 @@ export class CompositionService {
           where: { productionId, deletedAt: { not: null } },
           select: { id: true, title: true, parentId: true, deletedAt: true }, orderBy: { deletedAt: "desc" }
         }) : [];
+        // 대본 장면과 연결된 구간은 글이 같은지(SYNCED) 달라졌는지(DIVERGED) 알려 준다.
+        const syncStates = this.sync ? await this.sync.states(tx, sections) : new Map<string, string>();
         return { production, revision: production.compositionRevision, canEdit, durationMs: layout.durationMs,
-          sections: sections.map((section) => ({ ...section, timing: timing.get(section.id)! })), scripts, archived };
+          sections: sections.map((section) => ({ ...section, timing: timing.get(section.id)!, syncState: syncStates.get(section.id) ?? null })), scripts, archived };
       }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && ["P2021", "P2022"].includes(error.code)) {
@@ -81,8 +86,12 @@ export class CompositionService {
 
   async update(productionId: string, sectionId: string, dto: WriteSectionDto, user: RequestUser) {
     if (dto.title !== undefined && !dto.title.trim()) throw new BadRequestException("구간 제목을 입력하세요.");
+    // 글을 고치는 저장이고 대본과 같은 글이었다면, 저장 뒤 대본 줄도 같이 고친다.
+    const editsText = dto.scriptText !== undefined || dto.lyrics !== undefined;
     return this.mutate(productionId, dto.expectedRevision, user, "section.updated", async (tx) => {
       const current = await this.assertSection(tx, productionId, sectionId);
+      const wasSynced = editsText && this.sync
+        ? (await this.sync.states(tx, [current])).get(sectionId) === "SYNCED" : false;
       const changedParent = dto.parentId !== undefined && dto.parentId !== current.parentId;
       if (changedParent) {
         await this.assertParent(tx, productionId, dto.parentId ?? null, sectionId);
@@ -96,7 +105,23 @@ export class CompositionService {
         startMs: changedParent ? dto.startMs ?? null : dto.startMs, durationMs: dto.durationMs,
         backgroundMode: dto.backgroundMode, musicMode: dto.musicMode, scoreMode: dto.scoreMode
       } });
-      return { id: sectionId };
+      // 구성 글 저장과 대본 반영은 같은 revision 잠금·transaction 안에서 끝낸다.
+      // 반영이 실패하면 전체 저장을 취소하여 일부만 저장된 상태로 남기지 않는다.
+      if (wasSynced && this.sync) {
+        const scriptChanges = await this.sync.push(tx, productionId, sectionId);
+        return { id: sectionId, scriptSynced: true, scriptChanges };
+      }
+      return { id: sectionId, scriptSynced: false };
+    });
+  }
+
+  /** 대본 ↔ 구간 글을 한 방향으로 맞춘다. PULL: 대본의 글로 구간을 갱신, PUSH: 구간의 글로 대본 줄을 갱신. */
+  async syncSection(productionId: string, sectionId: string, dto: SyncSectionDto, user: RequestUser) {
+    if (!this.sync) throw new BadRequestException("동기화를 사용할 수 없습니다.");
+    return this.mutate(productionId, dto.expectedRevision, user, dto.direction === "PUSH" ? "section.sync.push" : "section.sync.pull", async (tx) => {
+      await this.assertSection(tx, productionId, sectionId);
+      if (dto.direction === "PULL") return { id: sectionId, ...(await this.sync!.pull(tx, productionId, sectionId)) };
+      return { id: sectionId, ...(await this.sync!.push(tx, productionId, sectionId)) };
     });
   }
 
@@ -247,7 +272,10 @@ export class CompositionService {
     if (dto.scriptId) {
       const script = await this.prisma.script.findFirst({
         where: { id: dto.scriptId, productionId, deletedAt: null },
-        include: { acts: { orderBy: { order: "asc" }, include: { scenes: { orderBy: { order: "asc" }, include: { blocks: { orderBy: { order: "asc" }, include: { character: { select: { name: true } } } } } } } } }
+        include: { acts: { orderBy: { order: "asc" }, include: { scenes: { orderBy: { order: "asc" }, include: {
+          blocks: { orderBy: { order: "asc" }, include: { character: { select: { name: true } } } },
+          trackCues: { where: { deletedAt: null }, select: { durationSec: true } }
+        } } } } }
       });
       if (!script) throw new NotFoundException("가져올 대본을 찾을 수 없습니다.");
       const sections: ReviewedSectionDto[] = [];
@@ -259,10 +287,13 @@ export class CompositionService {
         const key = `act-${act.id}`;
         sections.push({ key, parentKey: null, title: act.title, kind: detect(act.title, "ACT"), scriptText: "", lyrics: "", sourceScriptId: script.id });
         for (const scene of act.scenes) {
-          const format = (block: typeof scene.blocks[number]) => `${block.character?.name || block.cueLabel ? `${block.character?.name || block.cueLabel}: ` : ""}${block.text}`;
+          // 구간 글 형식은 대본↔구간 동기화와 같은 함수로 만든다(지문 [ ], 메모 ※, 화자 "이름:").
+          const text = blocksToText(scene.blocks.map((block) => ({ id: block.id, order: block.order, type: block.type, text: block.text, characterId: block.characterId, characterName: block.character?.name ?? null, cueLabel: block.cueLabel })));
           sections.push({ key: `scene-${scene.id}`, parentKey: key, title: scene.title, kind: detect(scene.title, "SCENE"),
-            scriptText: scene.blocks.filter((b) => b.type !== "LYRIC").map(format).join("\n"),
-            lyrics: scene.blocks.filter((b) => b.type === "LYRIC").map(format).join("\n"), sourceScriptId: script.id, sourceSceneId: scene.id });
+            scriptText: text.scriptText,
+            lyrics: text.lyrics, sourceScriptId: script.id, sourceSceneId: scene.id,
+            // 대본에 시간이 없으면 줄별 추정값을 합산한다. 상위 장·막 길이는 하위 구간으로 자동 계산된다.
+            durationMs: Math.min(MAX_COMPOSITION_MS, sceneDurationMs(scene.blocks, scene.trackCues.map((cue) => cue.durationSec))) });
         }
       }
       this.assertImportSize(sections);
@@ -327,7 +358,7 @@ export class CompositionService {
           const isScore = sourceAsset && (sourceAsset.mime === "application/pdf" || IMAGES.includes(sourceAsset.mime));
           await tx.performanceSection.create({ data: {
             id: ids.get(section.key)!, productionId, parentId: isRoot ? null : ids.get(root.key)!, order: isRoot ? order++ : index - 1,
-            title: section.title.trim(), kind: section.kind, scriptText: section.scriptText, lyrics: section.lyrics,
+            title: section.title.trim(), kind: section.kind, scriptText: section.scriptText, lyrics: section.lyrics, durationMs: section.durationMs ?? null,
             sourceScriptId: section.sourceScriptId ?? (section.sourceSceneId ? scenes.get(section.sourceSceneId)?.act.scriptId : null), sourceSceneId: section.sourceSceneId ?? null,
             scoreMode: isRoot && isScore ? "OWN" : "INHERIT",
             ...(isRoot && sourceAsset ? { media: { create: { assetId: sourceAsset.id, slot: isScore ? "SCORE" : "SOURCE", label: sourceAsset.fileName || "가져오기 원본", order: 0 } } } : {})
@@ -349,7 +380,7 @@ export class CompositionService {
     if (!production) throw new NotFoundException("공연을 찾을 수 없습니다.");
     if (await isProductionAdmin(this.prisma, user, productionId)) return true;
     const membership = await this.prisma.membership.findFirst({ where: { productionId, userId: user.id }, select: { roles: { select: { role: true } } } });
-    if (!membership || production.visibility !== "PUBLISHED") throw new ForbiddenException("배정된 공개 공연의 자료만 볼 수 있습니다.");
+    if (!membership) throw new ForbiddenException("배정된 공연의 자료만 볼 수 있습니다.");
     const canEdit = membership.roles.some(({ role }) => EDIT_ROLES.includes(role));
     if (editing && !canEdit) throw new ForbiddenException("장·막 구성은 운영자·기획자·연출자만 수정할 수 있습니다.");
     return canEdit;

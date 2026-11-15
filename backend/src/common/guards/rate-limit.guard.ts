@@ -92,14 +92,7 @@ export class RateLimitGuard implements CanActivate {
   }
 
   private clientIp(request: Request) {
-    // X-Forwarded-For는 신뢰할 수 있는 프록시 뒤에서만 사용 — 클라이언트가 임의 값으로 버킷을 우회하지 못하게 한다.
-    if (this.config.get<string>("RATE_LIMIT_TRUST_PROXY") === "true") {
-      const forwardedFor = request.headers["x-forwarded-for"];
-      const firstForwarded = Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor?.split(",")[0];
-      if (firstForwarded?.trim()) {
-        return firstForwarded.trim();
-      }
-    }
+    // 프록시 뒤에서는 main.ts가 `trust proxy`를 설정해 request.ip가 신뢰 가능한 홉 기준으로 계산된다. X-Forwarded-For를 직접 읽지 않는다.
     return (request.ip || request.socket.remoteAddress || "unknown").trim();
   }
 

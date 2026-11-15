@@ -72,3 +72,56 @@ describe("validateEnvironment Resend configuration", () => {
     );
   });
 });
+
+describe("deployment configuration boundaries", () => {
+  it("permits explicitly paused Resend without keys while keeping production authentication strict", () => {
+    const config = validateEnvironment(productionEnvironment({ MAIL_SENDING_ENABLED: "false", RESEND_API_KEY: "", RESEND_FROM_EMAIL: "" }));
+    expect(config.MAIL_SENDING_ENABLED).toBe("false"); expect(config.MAIL_TRANSPORT).toBe("resend");
+    expect(() => validateEnvironment(productionEnvironment({ MAIL_SENDING_ENABLED: "false", JWT_ACCESS_SECRET: "weak" }))).toThrow("JWT_ACCESS_SECRET");
+  });
+  it("requires credentials as soon as sending is enabled", () => {
+    expect(() => validateEnvironment(productionEnvironment({ MAIL_SENDING_ENABLED: "true", RESEND_API_KEY: "" }))).toThrow("RESEND_API_KEY");
+    expect(() => validateEnvironment(productionEnvironment({ MAIL_SENDING_ENABLED: "yes" }))).toThrow("MAIL_SENDING_ENABLED");
+  });
+  it.each(["https://user:pass@example.com", "https://example.com?token=secret", "https://example.com#fragment"])("rejects unsafe public base URL %s", (APP_PUBLIC_URL) => {
+    expect(() => validateEnvironment(productionEnvironment({ APP_PUBLIC_URL }))).toThrow("APP_PUBLIC_URL");
+  });
+  it("rejects path-containing CORS origins and mail header injection", () => {
+    expect(() => validateEnvironment(productionEnvironment({ CORS_ORIGINS: "https://example.com/path" }))).toThrow("CORS_ORIGINS");
+    const injected = `Sender${String.fromCharCode(13, 10)}Bcc: other@example.com <mail@example.com>`;
+    expect(() => validateEnvironment(productionEnvironment({ RESEND_FROM_EMAIL: injected }))).toThrow("RESEND_FROM_EMAIL");
+  });
+});
+
+describe("validateEnvironment asset storage", () => {
+  const r2 = { ASSET_STORAGE: "r2", R2_ACCOUNT_ID: "0123456789abcdef0123456789abcdef", R2_ACCESS_KEY_ID: "k".repeat(32), R2_SECRET_ACCESS_KEY: "s".repeat(64), R2_BUCKET: "attachment" };
+
+  it("defaults to local disk and rejects unknown drivers", () => {
+    expect(validateEnvironment(productionEnvironment()).ASSET_STORAGE).toBe("local");
+    expect(() => validateEnvironment(productionEnvironment({ ASSET_STORAGE: "s3" }))).toThrow("ASSET_STORAGE");
+  });
+
+  it("requires the R2 credentials, and then no longer needs a local object directory in production", () => {
+    expect(() => validateEnvironment(productionEnvironment({ ...r2, R2_BUCKET: "" }))).toThrow("R2_BUCKET");
+    const config = validateEnvironment(productionEnvironment({ ...r2, ASSET_OBJECT_DIR: ".relative" }));
+    expect(config.ASSET_STORAGE).toBe("r2");
+    expect(config.UPLOAD_URL_TTL).toBe("3600");
+    expect(() => validateEnvironment(productionEnvironment({ ASSET_OBJECT_DIR: ".relative" }))).toThrow("ASSET_OBJECT_DIR");
+  });
+
+  it("catches pasted placeholders and malformed values at startup", () => {
+    expect(() => validateEnvironment(productionEnvironment({ ...r2, R2_ACCESS_KEY_ID: "..." }))).toThrow("R2_ACCESS_KEY_ID");
+    expect(() => validateEnvironment(productionEnvironment({ ...r2, R2_SECRET_ACCESS_KEY: "short" }))).toThrow("R2_SECRET_ACCESS_KEY");
+    expect(() => validateEnvironment(productionEnvironment({ ...r2, R2_BUCKET: "R2_BUCKETattachment" }))).toThrow("R2_BUCKET");
+    expect(() => validateEnvironment(productionEnvironment({ ...r2, R2_ACCOUNT_ID: "abc" }))).toThrow("R2_ACCOUNT_ID");
+  });
+
+  it("validates and normalizes the explicit legacy project list at startup", () => {
+    const config = validateEnvironment(productionEnvironment({ ...r2, R2_PROJECT_NAME: "art-bridge", R2_LEGACY_PROJECT_NAMES: " reading-musical,art-bridge,reading-musical " }));
+    expect(config.R2_PROJECT_NAME).toBe("art-bridge");
+    expect(config.R2_LEGACY_PROJECT_NAMES).toBe("reading-musical");
+    expect(() => validateEnvironment(productionEnvironment({ ...r2, R2_LEGACY_PROJECT_NAMES: "../other" }))).toThrow("R2_LEGACY_PROJECT_NAMES");
+    expect(() => validateEnvironment(productionEnvironment({ ...r2, R2_LEGACY_PROJECT_NAMES: "old,,other" }))).toThrow("R2_LEGACY_PROJECT_NAMES");
+    expect(() => validateEnvironment(productionEnvironment({ ...r2, R2_PROJECT_NAME: "../other" }))).toThrow("R2_PROJECT_NAME");
+  });
+});

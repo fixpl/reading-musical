@@ -1,7 +1,7 @@
 export type TimelineAsset = { id: string; kind: string; mime: string; storageKey: string };
-export type TimelineBlock = { id: string; type: string; text: string; order: number; startMs?: number | null; durationMs?: number | null; character: { id: string; name: string } | null };
+export type TimelineBlock = { id: string; type: string; text: string; order: number; startMs?: number | null; durationMs?: number | null; updatedAt?: string; character: { id: string; name: string } | null; characters?: Array<{ id: string; name: string }> };
 export type TimelineScene = { id: string; title: string; order: number; act: { id: string; title: string; order: number; scriptId?: string; script?: { title: string } }; blocks?: TimelineBlock[] };
-export type TimelineCue = { id: string; trackId: string; sceneId: string | null; cueNumber: string; content: string; note?: string | null; trigger?: string | null; startMs?: number | null; durationSec?: number | null; asset?: TimelineAsset | null };
+export type TimelineCue = { id: string; trackId: string; sceneId: string | null; cueNumber: string; content: string; note?: string | null; trigger?: string | null; startMs?: number | null; durationSec?: number | null; updatedAt?: string; asset?: TimelineAsset | null };
 export type TimelineItem = { id: string; kind: "line" | "cue"; sceneId: string | null; sceneTitle: string; startMs: number; durationMs: number; estimated: boolean; block?: TimelineBlock; cue?: TimelineCue };
 const valid = (value: unknown, minimum = 0): value is number => typeof value === "number" && Number.isFinite(value) && value >= minimum;
 

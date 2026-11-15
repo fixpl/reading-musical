@@ -11,6 +11,7 @@ import { ScheduleService } from "./schedule.service";
 @Module({
   imports: [PrismaModule, JwtModule.register({}), MailModule, NotificationsModule],
   controllers: [ProductionScheduleController, MyScheduleController],
-  providers: [ScheduleService, ScheduleNotificationsService, RolesGuard]
+  providers: [ScheduleService, ScheduleNotificationsService, RolesGuard],
+  exports: [ScheduleService]
 })
 export class ScheduleModule {}

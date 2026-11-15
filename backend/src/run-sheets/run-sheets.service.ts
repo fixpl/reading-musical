@@ -26,7 +26,6 @@ import {
   ReviseRunSheetDto,
   UpdateRunSheetItemDto
 } from "./dto";
-import { isPlatformAdmin } from "../common/access/is-production-admin";
 import { assertProductionMembership } from "../common/access/assert-production-membership";
 import { MEMBERSHIP_BASE_INCLUDE } from "../common/prisma-includes/membership.include";
 import { RunSheetAuditService } from "./run-sheet-audit.service";
@@ -145,7 +144,7 @@ export class RunSheetsService {
       production,
       myMembershipId,
       myRoles,
-      canEdit: this.hasAnyRole(myRoles, EDIT_ROLES) || isPlatformAdmin(user),
+      canEdit: membership === null || this.hasAnyRole(myRoles, EDIT_ROLES),
       events,
       runSheets,
       scenes,
@@ -481,7 +480,7 @@ export class RunSheetsService {
       throw new ConflictException("잠긴 진행표의 항목만 완료 처리할 수 있어요");
     }
     const item = this.assertItemInRunSheet(runSheet, itemId);
-    if (!this.canCompleteItem(item, membership, user)) {
+    if (!this.canCompleteItem(item, membership)) {
       throw new ForbiddenException("이 진행표 항목을 완료할 권한이 없어요");
     }
     const done = dto.done ?? true;
@@ -756,11 +755,10 @@ export class RunSheetsService {
 
   private canCompleteItem(
     item: RunSheetItemForPolicy,
-    membership: MembershipForPolicy | null,
-    user: RequestUser
+    membership: MembershipForPolicy | null
   ) {
-    if (isPlatformAdmin(user)) return true;
-    if (!membership) return false;
+    // null은 assertMembership이 해당 공연의 관리자임을 검증한 결과다.
+    if (membership === null) return true;
     const roles = membership.roles.map((role) => role.role);
     if (this.hasAnyRole(roles, EDIT_ROLES)) return true;
     if (item.ownerMembershipId && item.ownerMembershipId === membership.id) return true;

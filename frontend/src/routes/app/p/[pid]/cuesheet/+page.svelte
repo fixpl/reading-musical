@@ -1,24 +1,34 @@
 <script lang="ts">
-    import { goto } from "$app/navigation";
+    import { cuesheetCsv, downloadText } from "$lib/domain/cuesheet-export";
+  import ImportDialog from "$lib/components/app/cuesheet-import-dialog.svelte";
+  import { goto } from "$app/navigation";
   import { page } from "$app/stores";
+  import { onDestroy, tick, untrack } from "svelte";
   import { toast } from "svelte-sonner";
   import * as Dialog from "$lib/components/ui/dialog";
   import * as Select from "$lib/components/ui/select";
   import { Badge } from "$lib/components/ui/badge";
   import { Button } from "$lib/components/ui/button";
+  import { ConfirmDialog, type ConfirmAsk } from "$lib/components/ui/confirm-dialog";
   import { Input } from "$lib/components/ui/input";
   import { Label } from "$lib/components/ui/label";
   import { Skeleton } from "$lib/components/ui/skeleton";
   import { Textarea } from "$lib/components/ui/textarea";
-  import { apiRequest, uploadSignedObject } from "$lib/api/client";
-  import AiCueDraftDialog from "$lib/components/app/ai-cue-draft-dialog.svelte";
+  import { apiRequest, streamNdjson, uploadForm, uploadSignedObject, type StreamEvent } from "$lib/api/client";
+  import { assertCurrentSession, captureSession, isCurrentSession, type ClientSession } from "$lib/api/session";
   import CueSheetSettingsDialog from "$lib/components/app/cue-sheet-settings-dialog.svelte";
   import CueStudio from "$lib/components/app/cue-studio.svelte";
+  import { formatTime, mediaOwner, type CompositionBoard, type CompositionSection } from "$lib/domain/composition";
+  import { cueSheetModel } from "$lib/domain/cue-sheet-model";
   import ChevronLeftIcon from "@lucide/svelte/icons/chevron-left";
   import PlusIcon from "@lucide/svelte/icons/plus";
   import Settings2Icon from "@lucide/svelte/icons/settings-2";
-  import SparklesIcon from "@lucide/svelte/icons/sparkles";
+  import BookOpenIcon from "@lucide/svelte/icons/book-open";
   import MonitorIcon from "@lucide/svelte/icons/monitor";
+
+  let disposed = false;
+  const viewSession = captureSession();
+  onDestroy(() => { disposed = true; });
 
   type Track = {
     id: string;
@@ -45,6 +55,7 @@
     order: number;
     startMs?: number | null;
     durationMs?: number | null;
+    updatedAt?: string;
     character: { id: string; name: string } | null;
   };
 
@@ -56,12 +67,12 @@
     content: string;
     note: string | null;
     sceneId: string | null;
-    scene: { id: string; title: string; order: number; act: { id: string; title: string; order: number } } | null;
-    character: { id: string; name: string } | null;
+    character?: { id: string; name: string } | null;
     durationSec: number | null;
     startMs?: number | null;
     asset?: CueAsset | null;
-    author: { id: string; name: string };
+    fromComposition?: boolean;
+    updatedAt?: string;
   };
 
   type CastingRole = { id: string; name: string };
@@ -86,7 +97,16 @@
     cues: Cue[];
     scenes: Scene[];
     viewer: { canManageTracks: boolean; editableTrackIds: string[] };
+    characters?: CastingRole[];
   };
+
+
+  type DraftCue = { track: string; content: string; trigger: string | null; note: string | null; character?: string | null; seconds?: number | null };
+  type DraftLine = { kind: string; speaker: string | null; text: string };
+  type DraftScene = { title: string; summary: string | null; lines: DraftLine[]; cues: DraftCue[] };
+  type DraftAct = { title: string; scenes: DraftScene[] };
+  type AiDraft = { acts: DraftAct[] };
+  type AiStats = { acts: number; scenes: number; cues: number; lines: number; cuesByTrack: Record<string, number> };
 
   const pid = $derived($page.params.pid ?? "");
 
@@ -101,11 +121,44 @@
     "oklch(0.6 0.118 184.704)"
   ];
 
+  let confirmation: { ask: ConfirmAsk };
   let board = $state<Board | null>(null);
   let title = $state("큐시트");
   let loading = $state(true);
+  let loadError = $state("");
+  let compositionSections = $state<CompositionSection[]>([]);
+  let compositionRevision = $state<number | null>(null);
+  // 기본은 타임라인(공연 기획의 핵심 화면). 좁은 화면은 표가 보기 편해 표로 시작하고, 고른 보기는 기억한다.
   let view = $state<"list" | "timeline">("list");
+  const VIEW_KEY = "cuesheet-view";
+  function initialView(): "list" | "timeline" {
+    try {
+      const saved = localStorage.getItem(VIEW_KEY);
+      if (saved === "list" || saved === "timeline") return saved;
+    } catch { /* 저장소를 못 쓰는 환경에서는 기본값 */ }
+    return window.innerWidth >= 1024 ? "timeline" : "list";
+  }
+  function chooseView(next: "list" | "timeline") {
+    view = next;
+    try { localStorage.setItem(VIEW_KEY, next); } catch { /* 무시 */ }
+  }
+  $effect(() => { view = initialView(); });
   let onlyMine = $state(false);
+  let importOpen = $state(false);
+
+  // 큐시트를 엑셀·한글 문서로 가져가 쓸 수 있게 CSV로 내려받는다(현재 보이는 모든 큐).
+  // 현재 큐시트를 종이·PDF로 인쇄한다(표 보기 기준, 앱 메뉴는 빠진다).
+  async function printSheet() {
+    if (view !== "list") chooseView("list");
+    await tick();
+    window.print();
+  }
+  function exportCsv() {
+    if (!board) return;
+    const name = `${(title || "큐시트").replace(/[\\/:*?"<>|]/g, " ").trim()} 큐시트.csv`;
+    downloadText(name, cuesheetCsv(model.cues, model.scenes, board.tracks));
+    toast.success(`큐 ${model.cues.length}개를 ${name}로 내려받았어요.`);
+  }
 
   // 큐 작성·수정 다이얼로그
   let cueOpen = $state(false);
@@ -121,10 +174,17 @@
   let formAssetId = $state("");
   let cueSaving = $state(false);
   let castingRoles = $state<CastingRole[]>([]);
+  const model = $derived(cueSheetModel(compositionSections, board?.scenes ?? [], board?.cues ?? [], board?.characters ?? castingRoles, board?.tracks ?? []));
 
   // 미디어(영상·음원) 라이브러리 + 배경 영상
   let mediaAssets = $state<MediaAsset[]>([]);
   let backgroundVideo = $state<{ url: string; mime: string } | null>(null);
+  // 장·막 구성에서 장면에 연결한 반복 배경 영상 — 타임라인 스테이지에 깔린다.
+  let sceneSectionIds = $state<Record<string, string>>({});
+  let sceneVisuals = $state<Record<string, { url: string; kind: "VIDEO" | "IMAGE"; loop: boolean; sourceStartSec: number; label?: string }>>({});
+  let signedMediaUrls = $state<Record<string, string>>({});
+  // 자료별 서명 시각(ms) — 구성이 바뀌어도 오래된 서명은 다시 받는다. 화면에 쓰지 않아 반응형이 아니다.
+  let signedAt: Record<string, number> = {};
   let mediaUploading = $state(false);
   let backgroundUploading = $state(false);
 
@@ -149,9 +209,6 @@
     return r ? `${m}분 ${r}초` : `${m}분`;
   }
 
-  // AI 초안 다이얼로그 — 상태/로직은 ai-cue-draft-dialog.svelte가 소유한다.
-  let aiOpen = $state(false);
-
   // 트랙 관리 다이얼로그
   let tracksOpen = $state(false);
   let trackSaving = $state(false);
@@ -167,50 +224,119 @@
   const canManage = $derived(board?.viewer.canManageTracks ?? false);
   const showMineToggle = $derived(canEditSomething && !canManage);
 
-  // "내 큐만"은 숨기지 않고 맥락 행을 흐리게 남긴다 — 목업 ②의 표 방식.
-  const mineCount = $derived(board ? board.cues.filter((cue) => editableSet.has(cue.trackId)).length : 0);
+  // 담당 큐를 강조할 때 앞뒤 흐름을 볼 수 있도록 다른 큐도 남겨 둔다.
+  const mineCount = $derived(model.cues.filter((cue) => editableSet.has(cue.trackId)).length);
 
   const sceneGroups = $derived.by(() => {
     if (!board) return [];
     const groups = new Map<string, { label: string; cues: Cue[] }>();
-    const orderedScenes = [...board.scenes];
+    const orderedScenes = [...model.scenes];
     for (const scene of orderedScenes) {
       groups.set(scene.id, { label: `${scene.act.title} · ${scene.title}`, cues: [] });
     }
     groups.set("__none", { label: "장면 미지정", cues: [] });
-    for (const cue of board.cues) {
+    for (const cue of model.cues) {
       const key = cue.sceneId ?? "__none";
       (groups.get(key) ?? groups.get("__none"))!.cues.push(cue);
     }
     return [...groups.entries()].filter(([, group]) => group.cues.length > 0);
   });
 
+  // 처음 불러오는 중(보여줄 큐시트가 아직 없음)일 때만 스켈레톤 — 수정 뒤 재조회는 화면을 유지한다.
+  const initialLoading = $derived(loading && !board);
+
   // pid가 바뀌어도(공연 전환) 다시 불러온다 — onMount는 재실행되지 않음.
+  // 이전 공연의 데이터가 남아 다른 공연 주소에서 편집되지 않도록 먼저 비운다.
   $effect(() => {
     void pid;
-    void load();
+    untrack(() => {
+      board = null;
+      title = "큐시트";
+      compositionSections = [];
+      compositionRevision = null;
+      castingRoles = [];
+      mediaAssets = [];
+      backgroundVideo = null;
+      sceneSectionIds = {};
+      sceneVisuals = {};
+      signedMediaUrls = {};
+      signedAt = {};
+      loading = true;
+      loadError = "";
+      void load();
+    });
   });
 
-  async function load() {
-    loading = true;
+  // 배경 영상 구성(구간 구조·배경 자료)이 바뀔 때만 달라지는 값 — 큐만 고칠 때는 영상 주소를 다시 받지 않는다.
+  const visualSignature = $derived(JSON.stringify(compositionSections.map(section => [
+    section.id, section.parentId, section.sourceSceneId, section.backgroundMode,
+    section.media.filter(media => media.slot === "BACKGROUND").map(media => [media.assetId, media.asset.kind, media.loop, media.sourceStartMs, media.label])
+  ])));
+
+  // 서명 주소는 10분 뒤 만료되므로 8분마다 다시 받는다(refresh). 구성이 바뀌었을 땐 아직 서명하지 않았거나 7분 넘은 자료만 받는다.
+  async function loadSceneVisuals(id: string, refresh: boolean) {
     try {
-      const result = await apiRequest<Board>(`/productions/${pid}/cue-sheet`);
+      const sections = compositionSections;
+      const cached = signedMediaUrls;
+      const picks = sections.flatMap((section) => {
+        const owner = mediaOwner(sections, section, "BACKGROUND");
+        const media = owner?.media.find((item) => item.slot === "BACKGROUND");
+        return media ? [{ sceneId: section.id, media }] : [];
+      });
+      sceneSectionIds = Object.fromEntries(sections.flatMap(section => [[section.id, section.id], ...(section.sourceSceneId ? [[section.sourceSceneId, section.id]] : [])]));
+      const assets = [...new Set(sections.flatMap(section => section.media.filter(media => media.slot === "BACKGROUND").map(media => media.assetId)))];
+      const now = Date.now();
+      const nextSignedAt: Record<string, number> = {};
+      const urls = await Promise.all(assets.map(assetId => refresh || !cached[assetId] || now - (signedAt[assetId] ?? 0) > 7 * 60_000
+        ? apiRequest<{ url: string }>(`/assets/${assetId}/url`).then(result => { nextSignedAt[assetId] = now; return result.url; }).catch(() => cached[assetId] ?? null)
+        : Promise.resolve(cached[assetId])));
+      if (id !== pid) return;
+      signedAt = Object.fromEntries(assets.flatMap(assetId => {
+        const at = nextSignedAt[assetId] ?? signedAt[assetId];
+        return at ? [[assetId, at]] : [];
+      }));
+      signedMediaUrls = Object.fromEntries(assets.flatMap((assetId, index) => urls[index] ? [[assetId, urls[index]!]] : []));
+      sceneVisuals = Object.fromEntries(picks.flatMap(pick => signedMediaUrls[pick.media.assetId]
+        ? [[pick.sceneId, { url: signedMediaUrls[pick.media.assetId], kind: pick.media.asset.kind === "IMAGE" ? "IMAGE" as const : "VIDEO" as const, loop: pick.media.loop, sourceStartSec: pick.media.sourceStartMs / 1000, label: pick.media.label || undefined }]] : []));
+    } catch {
+      if (id === pid) sceneVisuals = {};
+    }
+  }
+  $effect(() => {
+    const id = pid;
+    void visualSignature;
+    untrack(() => void loadSceneVisuals(id, false));
+    const timer = setInterval(() => void loadSceneVisuals(id, true), 8 * 60_000);
+    return () => clearInterval(timer);
+  });
+
+  async function load(id = pid, session: ClientSession = captureSession()) {
+    if (disposed || id !== pid || !isCurrentSession(session)) return;
+    loading = true;
+    loadError = "";
+    try {
+      const [result, composition] = await Promise.all([
+        apiRequest<Board>(`/productions/${id}/cue-sheet`, { session }),
+        apiRequest<CompositionBoard>(`/productions/${id}/composition`, { session })
+      ]);
+      if (disposed || id !== pid || !isCurrentSession(session)) return;
       title = result.production.title;
       board = result;
-      castingRoles = await apiRequest<CastingRole[]>(`/productions/${pid}/roles`).catch(() => []);
-      mediaAssets = await apiRequest<MediaAsset[]>(`/assets?productionId=${pid}`).catch(() => []);
-      if (result.production.backgroundAsset) {
-        const signed = await apiRequest<{ url: string; mime: string }>(
-          `/assets/${result.production.backgroundAsset.id}/url`
-        ).catch(() => null);
-        backgroundVideo = signed ? { url: signed.url, mime: signed.mime } : null;
-      } else {
-        backgroundVideo = null;
-      }
+      compositionSections = composition.sections;
+      compositionRevision = composition.revision;
+      const [roles, assets, signed] = await Promise.all([
+        apiRequest<CastingRole[]>(`/productions/${id}/roles`, { session }).catch(() => []),
+        apiRequest<MediaAsset[]>(`/assets?productionId=${id}`, { session }).catch(() => []),
+        result.production.backgroundAsset ? apiRequest<{ url: string; mime: string }>(`/assets/${result.production.backgroundAsset.id}/url`, { session }).catch(() => null) : Promise.resolve(null)
+      ]);
+      if (disposed || id !== pid || !isCurrentSession(session)) return;
+      castingRoles = roles;
+      mediaAssets = assets;
+      backgroundVideo = signed ? { url: signed.url, mime: signed.mime } : null;
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "큐시트를 불러오지 못했습니다");
+      if (!disposed && id === pid && isCurrentSession(session)) loadError = error instanceof Error ? error.message : "큐시트를 불러오지 못했어요";
     } finally {
-      loading = false;
+      if (!disposed && id === pid && isCurrentSession(session)) loading = false;
     }
   }
 
@@ -219,39 +345,49 @@
     upload: { url: string; method?: string };
   };
 
-  async function uploadMediaFile(file: File, purpose: "BACKGROUND_VIDEO" | "CUE_MEDIA") {
+  async function uploadMediaFile(file: File, purpose: "BACKGROUND_VIDEO" | "CUE_MEDIA", id: string, session: ClientSession) {
+    assertCurrentSession(session);
     const created = await apiRequest<AssetCreateResponse>("/assets", {
       method: "POST",
+      session,
       body: JSON.stringify({
         purpose,
-        productionId: pid,
+        productionId: id,
         fileName: file.name,
         mimeType: file.type,
         size: file.size
       })
     });
-    await uploadSignedObject(created.upload, file, file.type);
+    assertCurrentSession(session);
+    await uploadSignedObject(created.upload, file, file.type, { session });
+    assertCurrentSession(session);
     return created.asset;
   }
 
   async function onPickBackground(event: Event) {
+    const session = captureSession(); const id = pid;
     const input = event.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
     input.value = "";
-    if (!file) return;
+    if (!file || disposed || !isCurrentSession(viewSession)) return;
     backgroundUploading = true;
     try {
-      const asset = await uploadMediaFile(file, "BACKGROUND_VIDEO");
-      await apiRequest(`/productions/${pid}/background-video`, {
+      const asset = await uploadMediaFile(file, "BACKGROUND_VIDEO", id, session);
+      assertCurrentSession(session);
+      if (disposed || id !== pid) return;
+      await apiRequest(`/productions/${id}/background-video`, {
         method: "PATCH",
+        session,
         body: JSON.stringify({ assetId: asset.id })
       });
-      toast.success("배경 영상을 등록했습니다. 타임라인 재생이 영상에 맞춰집니다.");
-      await load();
+      if (disposed || id !== pid || !isCurrentSession(session)) return;
+      toast.success("배경 영상을 등록했어요. 타임라인 재생이 영상에 맞춰져요.");
+      await load(id, session);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "배경 영상을 올리지 못했습니다");
+      if (disposed || id !== pid || !isCurrentSession(session)) return;
+      toast.error(error instanceof Error ? error.message : "배경 영상을 올리지 못했어요");
     } finally {
-      backgroundUploading = false;
+      if (!disposed && id === pid && isCurrentSession(session)) backgroundUploading = false;
     }
   }
 
@@ -262,43 +398,51 @@
         method: "PATCH",
         body: JSON.stringify({ assetId: null })
       });
-      toast.success("배경 영상을 해제했습니다");
+      toast.success("배경 영상을 해제했어요");
       await load();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "해제하지 못했습니다");
+      toast.error(error instanceof Error ? error.message : "해제하지 못했어요");
     } finally {
       backgroundUploading = false;
     }
   }
 
   async function onPickCueMedia(event: Event) {
+    const session = captureSession(); const id = pid;
     const input = event.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
     input.value = "";
-    if (!file) return;
+    if (!file || disposed || !isCurrentSession(viewSession)) return;
     mediaUploading = true;
     try {
-      const asset = await uploadMediaFile(file, "CUE_MEDIA");
-      mediaAssets = await apiRequest<MediaAsset[]>(`/assets?productionId=${pid}`).catch(() => mediaAssets);
+      const asset = await uploadMediaFile(file, "CUE_MEDIA", id, session);
+      assertCurrentSession(session);
+      if (disposed || id !== pid) return;
+      const assets = await apiRequest<MediaAsset[]>(`/assets?productionId=${id}`, { session }).catch(() => mediaAssets);
+      if (disposed || id !== pid || !isCurrentSession(session)) return;
+      mediaAssets = assets;
       formAssetId = asset.id;
-      toast.success("파일을 올렸습니다. 이 큐에 연결됩니다.");
+      toast.success("파일을 올렸어요. 이 큐에 연결돼요.");
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "파일을 올리지 못했습니다");
+      if (disposed || id !== pid || !isCurrentSession(session)) return;
+      toast.error(error instanceof Error ? error.message : "파일을 올리지 못했어요");
     } finally {
-      mediaUploading = false;
+      if (!disposed && id === pid && isCurrentSession(session)) mediaUploading = false;
     }
   }
 
   // 타임라인 대본 레인에서 블록을 끌어 놓았을 때 — 시작/길이(ms)를 저장한다.
   async function studioMoveBlock(blockId: string, startMs: number | null, durationMs: number | null) {
+    const block = board?.scenes.flatMap(scene => scene.blocks ?? []).find(block => block.id === blockId);
+    if (!block) return;
     try {
       await apiRequest(`/productions/${pid}/blocks/${blockId}`, {
         method: "PATCH",
-        body: JSON.stringify({ startMs, durationMs })
+        body: JSON.stringify({ startMs, durationMs, expectedUpdatedAt: block.updatedAt })
       });
       await load();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "블록 배치를 저장하지 못했습니다");
+      toast.error(error instanceof Error ? error.message : "블록 배치를 저장하지 못했어요");
     }
   }
 
@@ -315,7 +459,11 @@
     editingCue = null;
     const editable = board?.tracks.filter((track) => editableSet.has(track.id)) ?? [];
     formTrackId = trackId && editableSet.has(trackId) ? trackId : (editable[0]?.id ?? "");
-    formSceneId = sceneId ?? "";
+    formSceneId = compositionSections.find(section => section.id === sceneId)?.sourceSceneId ?? sceneId ?? "";
+    if (sceneId && compositionSections.some(section => section.id === sceneId && !section.sourceSceneId)) {
+      toast.info("이 구간의 글·행동은 장·막 구성에서 편집해 주세요. 새 큐에는 연결할 대본 장면을 선택해 주세요.");
+      formSceneId = "";
+    }
     formCueNumber = "";
     formTrigger = "";
     formContent = "";
@@ -328,13 +476,19 @@
 
   function openScriptScene(sceneId: string | null) {
     if (canManage && sceneId) {
-      void goto(`/app/p/${pid}/manage/script?scene=${sceneId}`);
+      // 대본 편집은 구성 화면의 "줄 편집"으로 합쳐졌다. 장면과 연결된 구간이 있으면 그 구간의 줄 편집을 연다.
+      const sectionId = sceneSectionIds[sceneId];
+      const section = compositionSections.find(section => section.id === sectionId);
+      const tab = section?.sourceSceneId && section.sourceScriptId ? "lines" : "section";
+      void goto(`/app/p/${pid}/composition${sectionId ? `?section=${sectionId}&tab=${tab}` : ""}`);
     } else {
       void goto(`/app/p/${pid}/script${sceneId ? `#scene-${sceneId}` : ""}`);
     }
   }
 
   function openEditCue(cue: Cue) {
+    if (cue.fromComposition) { openScriptScene(cue.sceneId); return; }
+    cue = board?.cues.find(item => item.id === (model.cueSources.get(cue.id)?.id ?? cue.id)) ?? cue;
     if (!editableSet.has(cue.trackId)) return;
     editingCue = cue;
     formTrackId = cue.trackId;
@@ -368,7 +522,7 @@
       if (editingCue) {
         await apiRequest(`/productions/${pid}/cue-sheet/cues/${editingCue.id}`, {
           method: "PATCH",
-          body: JSON.stringify({ ...body, cueNumber: formCueNumber.trim() || undefined })
+          body: JSON.stringify({ ...body, cueNumber: formCueNumber.trim() || undefined, expectedUpdatedAt: editingCue.updatedAt })
         });
       } else {
         await apiRequest(`/productions/${pid}/cue-sheet/tracks/${formTrackId}/cues`, {
@@ -379,7 +533,7 @@
       cueOpen = false;
       await load();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "저장하지 못했습니다");
+      toast.error(error instanceof Error ? error.message : "저장하지 못했어요");
     } finally {
       cueSaving = false;
     }
@@ -387,13 +541,16 @@
 
   async function deleteCue() {
     if (!editingCue) return;
+    const cue = editingCue, productionId = pid;
+    const answer = await confirmation.ask({ title: "큐 삭제", description: `${cue.cueNumber} 큐를 삭제할까요? 삭제한 큐는 이 화면에서 개별로 되돌릴 수 없어요.`, confirmLabel: "큐 삭제", destructive: true });
+    if (!answer.confirmed || productionId !== pid) return;
     cueSaving = true;
     try {
-      await apiRequest(`/productions/${pid}/cue-sheet/cues/${editingCue.id}`, { method: "DELETE" });
+      await apiRequest(`/productions/${pid}/cue-sheet/cues/${cue.id}`, { method: "DELETE" });
       cueOpen = false;
       await load();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "삭제하지 못했습니다");
+      toast.error(error instanceof Error ? error.message : "삭제하지 못했어요");
     } finally {
       cueSaving = false;
     }
@@ -401,43 +558,58 @@
 
   // 타임라인 큐 상세에서 바로 삭제(소프트) — 되돌리기는 트랙 관리의 큐 전체 되돌리기.
   async function studioDeleteCue(cueId: string) {
+    const productionId = pid;
+    const answer = await confirmation.ask({ title: "큐 삭제", description: "이 큐를 삭제할까요? 삭제한 큐는 이 화면에서 개별로 되돌릴 수 없어요.", confirmLabel: "큐 삭제", destructive: true });
+    if (!answer.confirmed || productionId !== pid) return;
+    cueId = model.cueSources.get(cueId)?.id ?? cueId;
     try {
       await apiRequest(`/productions/${pid}/cue-sheet/cues/${cueId}`, { method: "DELETE" });
-      toast.success("큐를 삭제했습니다");
+      toast.success("큐를 삭제했어요");
       await load();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "삭제하지 못했습니다");
+      toast.error(error instanceof Error ? error.message : "삭제하지 못했어요");
     }
   }
 
   // 타임라인에서 클립 끝을 끌어 큐 길이(초)를 바꾼다.
   async function studioResizeCue(cueId: string, durationSec: number) {
+    cueId = model.cueSources.get(cueId)?.id ?? cueId;
     try {
       await apiRequest(`/productions/${pid}/cue-sheet/cues/${cueId}`, {
         method: "PATCH",
-        body: JSON.stringify({ durationSec })
+        body: JSON.stringify({ durationSec, expectedUpdatedAt: board?.cues.find(cue => cue.id === cueId)?.updatedAt })
       });
       await load();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "길이를 바꾸지 못했습니다");
+      toast.error(error instanceof Error ? error.message : "길이를 바꾸지 못했어요");
     }
   }
 
   // 타임라인에서 시간 지정 클립을 끌어 시작 시각(ms)을 바꾼다.
   async function studioMoveCue(cueId: string, startMs: number) {
     try {
+      const source = model.cueSources.get(cueId);
+      const section = compositionSections.find(item => item.id === source?.sectionId);
+      if (section && (startMs < section.timing.startMs || startMs >= section.timing.startMs + section.timing.durationMs)) {
+        throw new Error("큐는 연결된 구간 안에서 이동해 주세요. 구간을 바꾸려면 큐 수정에서 장면을 선택해 주세요.");
+      }
+      startMs = Math.max(0, startMs - (source?.offsetMs ?? 0));
+      cueId = source?.id ?? cueId;
       await apiRequest(`/productions/${pid}/cue-sheet/cues/${cueId}`, {
         method: "PATCH",
-        body: JSON.stringify({ startMs })
+        body: JSON.stringify({ startMs, expectedUpdatedAt: board?.cues.find(cue => cue.id === cueId)?.updatedAt })
       });
       await load();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "시작 시각을 바꾸지 못했습니다");
+      toast.error(error instanceof Error ? error.message : "시작 시각을 바꾸지 못했어요");
     }
   }
 
   // 타임라인에서 클립을 끌어 순서(시간 위치)를 바꾼다.
   async function studioReorderCue(cueId: string, sceneId: string | null, orderedTrackCueIds: string[]) {
+    cueId = model.cueSources.get(cueId)?.id ?? cueId;
+    sceneId = compositionSections.find(item => item.id === sceneId)?.sourceSceneId ?? sceneId;
+    orderedTrackCueIds = [...new Set(orderedTrackCueIds.map(id => model.cueSources.get(id)?.id ?? id))];
     try {
       await apiRequest(`/productions/${pid}/cue-sheet/cues/${cueId}/reorder`, {
         method: "PATCH",
@@ -445,7 +617,7 @@
       });
       await load();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "순서를 바꾸지 못했습니다");
+      toast.error(error instanceof Error ? error.message : "순서를 바꾸지 못했어요");
     }
   }
 
@@ -453,16 +625,19 @@
     trackSaving = true;
     try {
       await apiRequest(`/productions/${pid}/cue-sheet/tracks/defaults`, { method: "POST" });
-      toast.success("기본 트랙을 만들었습니다");
+      toast.success("기본 트랙을 만들었어요");
       await load();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "트랙을 만들지 못했습니다");
+      toast.error(error instanceof Error ? error.message : "트랙을 만들지 못했어요");
     } finally {
       trackSaving = false;
     }
   }
 
   function onStudioEdit(cueId: string) {
+    const displayed = model.cues.find(cue => cue.id === cueId);
+    if (displayed?.fromComposition) { openScriptScene(displayed.sceneId); return; }
+    cueId = model.cueSources.get(cueId)?.id ?? cueId;
     const cue = board?.cues.find((item) => item.id === cueId);
     if (cue && editableSet.has(cue.trackId)) {
       openEditCue(cue);
@@ -474,56 +649,63 @@
   <title>큐시트 — {title}</title>
 </svelte:head>
 
-<div class="mx-auto w-full {view === 'timeline' ? 'max-w-[1500px]' : 'max-w-xl'}">
-  <div class="flex flex-wrap items-center gap-1 py-2">
-    <Button href={`/app/p/${pid}`} variant="ghost" size="icon" class="-ms-2 size-8" aria-label="공연 홈으로">
+<div class="mx-auto min-w-0 w-full {view === 'timeline' ? 'max-w-[1500px]' : 'max-w-5xl'}">
+  <div class="flex min-w-0 flex-wrap items-start gap-3 py-2">
+    <Button href={`/app/p/${pid}`} variant="ghost" size="icon" class="-ms-2 size-11" aria-label="공연 홈으로">
       <ChevronLeftIcon />
     </Button>
-    <div>
-      <h1 class="text-xl font-bold tracking-tight">큐시트</h1>
-      <p class="text-muted-foreground text-sm">{title}</p>
+    <div class="min-w-0 flex-1">
+      <h1 class="text-xl font-semibold tracking-tight sm:text-2xl">큐시트</h1>
+      <p class="text-muted-foreground mt-1 text-sm leading-6">장면별 큐와 앞뒤 흐름을 확인해요. 담당 트랙의 큐를 눌러 수정할 수 있어요.</p>
     </div>
-    <div class="ms-auto flex flex-wrap items-center gap-1.5">
+    <div class="flex w-full flex-wrap items-center gap-2 lg:ms-auto lg:w-auto">
       {#if board && board.tracks.length > 0}
-        <div class="bg-muted flex rounded-lg p-0.5">
-          <Button
-            variant={view === "list" ? "secondary" : "ghost"}
-            size="sm"
-            class="h-7 px-3 text-xs whitespace-nowrap"
-            onclick={() => (view = "list")}
-          >
-            표
-          </Button>
+        <div class="bg-muted flex rounded-lg p-0.5" role="group" aria-label="큐시트 보기 방식">
           <Button
             variant={view === "timeline" ? "secondary" : "ghost"}
             size="sm"
-            class="h-7 px-3 text-xs whitespace-nowrap"
-            onclick={() => (view = "timeline")}
+            class="min-h-11 px-3 whitespace-nowrap"
+            aria-pressed={view === "timeline"}
+            onclick={() => chooseView("timeline")}
           >
             타임라인
+          </Button>
+          <Button
+            variant={view === "list" ? "secondary" : "ghost"}
+            size="sm"
+            class="min-h-11 px-3 whitespace-nowrap"
+            aria-pressed={view === "list"}
+            onclick={() => chooseView("list")}
+          >
+            목록
           </Button>
         </div>
       {/if}
       {#if canManage}
-        <Button variant="outline" size="sm" class="h-8 whitespace-nowrap" onclick={() => (aiOpen = true)}>
-          <SparklesIcon />
-          AI 초안
+        <Button variant="outline" size="sm" class="h-8 whitespace-nowrap" href={`/app/p/${pid}/composition`}>
+          <BookOpenIcon aria-hidden="true" />
+          대본 등록
+        </Button>
+        {#if canManage}<Button variant="outline" size="sm" class="h-8 whitespace-nowrap" onclick={() => (importOpen = true)} title="엑셀·구글시트의 큐시트 표를 가져와요">엑셀에서 가져오기</Button>{/if}
+        <Button variant="outline" size="sm" class="h-8 whitespace-nowrap" disabled={!board?.cues.length} onclick={printSheet} title="인쇄하거나 PDF로 저장해요">인쇄</Button>
+        <Button variant="outline" size="sm" class="h-8 whitespace-nowrap" disabled={!board?.cues.length} onclick={exportCsv} title="엑셀·한글 문서에서 열 수 있는 표(CSV)로 내려받아요">
+          엑셀로 내보내기
         </Button>
         <Button variant="outline" size="sm" class="h-8 whitespace-nowrap" onclick={() => (tracksOpen = true)}>
           <Settings2Icon />
           트랙
         </Button>
         <label
-          class="border-input hover:bg-accent inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-md border px-3 text-sm font-medium whitespace-nowrap transition-colors {backgroundUploading
+          class="border-input hover:bg-accent inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 rounded-md border px-3 text-sm font-medium whitespace-nowrap transition-colors {backgroundUploading
             ? 'pointer-events-none opacity-50'
             : ''}"
-          title="공연 뒷배경으로 재생할 영상을 올립니다 (mp4·webm·mov, 최대 500MB)"
+          title="공연 뒷배경으로 재생할 영상을 올려요 (MP4, 최대 500MB)"
         >
           <MonitorIcon class="size-4" />
           {backgroundUploading ? "업로드 중…" : board?.production.backgroundAsset ? "배경 영상 교체" : "배경 영상"}
           <input
             type="file"
-            accept="video/mp4,video/webm,video/quicktime"
+            accept="video/mp4,.mp4"
             class="hidden"
             onchange={onPickBackground}
             disabled={backgroundUploading}
@@ -542,7 +724,7 @@
         {/if}
       {/if}
       {#if canEditSomething && (board?.tracks.length ?? 0) > 0}
-        <Button size="sm" class="h-8 whitespace-nowrap" onclick={() => openCreateCue()}>
+        <Button size="touch" class="whitespace-nowrap" onclick={() => openCreateCue()}>
           <PlusIcon />
           큐 추가
         </Button>
@@ -550,12 +732,29 @@
     </div>
   </div>
 
+  {#if board}
+    <div class="text-muted-foreground flex flex-wrap items-center gap-2 text-xs" role="status">
+      <span>{model.composed ? `연습과 같은 최신 공연 구성 · 버전 ${compositionRevision}` : "원본 대본 타임라인"} · 전체 {formatTime(model.totalMs)}</span>
+      <Button variant="ghost" size="sm" class="min-h-11" disabled={loading} onclick={() => load()}>최신 내용 불러오기</Button>
+      {#if canManage && model.composed}<a class="min-h-11 inline-flex items-center underline" href={`/app/p/${pid}/composition`}>구간 시간 편집</a>{/if}
+    </div>
+  {/if}
+  {#if loadError}<p role="alert" class="text-destructive mt-3 text-sm">{loadError} {board ? "현재 표시된 내용은 이전 조회 결과예요." : ""}<Button variant="outline" class="ms-2 min-h-11" onclick={() => load()}>다시 불러오기</Button></p>{/if}
+  {#if !initialLoading && model.unplacedCues.length}
+    <details class="mt-3 rounded-xl border border-amber-400/40 bg-amber-400/5 p-3 text-sm">
+      <summary class="min-h-11 cursor-pointer font-medium">현재 공연 구성에 배치되지 않은 큐 {model.unplacedCues.length}개</summary>
+      <p class="text-muted-foreground mb-2">연결 장면이 없거나 구간 시간 밖에 있는 큐예요. 장면 연결·구간 길이를 확인해 주세요. 현재 타임라인과 내보내기에는 포함되지 않아요.</p>
+      {#each model.unplacedCues as cue (cue.id)}<button type="button" class="block min-h-11 w-full rounded-lg px-2 text-start hover:bg-muted" disabled={!editableSet.has(cue.trackId)} onclick={() => openEditCue(cue)}>{trackName(cue.trackId)} · {cue.cueNumber} · {cue.content}</button>{/each}
+    </details>
+  {/if}
+
   {#if showMineToggle}
-    <div class="mt-1 flex gap-1.5">
+    <div class="mt-1 flex gap-1.5" role="group" aria-label="큐 범위">
       <Button
         variant={onlyMine ? "ghost" : "secondary"}
         size="sm"
-        class="h-7 px-3 text-xs"
+        class="min-h-11 px-3"
+        aria-pressed={!onlyMine}
         onclick={() => (onlyMine = false)}
       >
         전체
@@ -563,15 +762,16 @@
       <Button
         variant={onlyMine ? "secondary" : "ghost"}
         size="sm"
-        class="h-7 px-3 text-xs"
+        class="min-h-11 px-3"
+        aria-pressed={onlyMine}
         onclick={() => (onlyMine = true)}
       >
-        내 큐만
+        내 큐 강조
       </Button>
     </div>
   {/if}
 
-  {#if !loading && castingRoles.length > 0}
+  {#if !initialLoading && castingRoles.length > 0}
     <div class="text-muted-foreground mt-2 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs">
       <span class="font-semibold">출연 {castingRoles.length}</span>
       <span class="text-muted-foreground/50">·</span>
@@ -584,23 +784,25 @@
     </div>
   {/if}
 
-  {#if loading}
+  {#if initialLoading}
     <div class="mt-4 space-y-2">
       {#each Array(5) as _, i (i)}
         <Skeleton class="h-16 w-full rounded-2xl" />
       {/each}
     </div>
+  {:else if !board && loadError}
+    <p class="text-muted-foreground mt-4 text-sm">최신 공연 내용을 확인한 뒤 큐시트를 표시해요.</p>
   {:else if !board || board.tracks.length === 0}
     <div class="bg-card mt-4 rounded-2xl px-6 py-14 text-center">
-      <p class="font-semibold">큐시트가 아직 준비되지 않았습니다</p>
+      <p class="font-semibold">큐시트가 아직 준비되지 않았어요</p>
       <p class="text-muted-foreground mt-1 text-sm">
-        트랙(해설·배우·음악·효과음·영상·조명)을 만들고 각 담당자가 자기 큐를 작성합니다.
+        제작진이 음향·조명 등 트랙과 담당자를 정하면 이곳에서 큐를 확인할 수 있어요.
       </p>
       {#if canManage}
         <div class="mt-5 flex flex-wrap justify-center gap-2">
           <Button size="sm" onclick={createDefaultTracks} disabled={trackSaving}>기본 트랙 만들기</Button>
-          <Button size="sm" variant="outline" onclick={() => (aiOpen = true)}>
-            <SparklesIcon />
+          <Button size="sm" variant="outline" href={`/app/p/${pid}/composition`}>
+            <BookOpenIcon aria-hidden="true" />
             대본으로 초안 만들기
           </Button>
           <Button size="sm" variant="outline" onclick={() => (tracksOpen = true)}>직접 구성</Button>
@@ -610,15 +812,19 @@
   {:else if view === "timeline"}
     <div class="border-primary/20 bg-primary/5 text-muted-foreground mt-4 flex items-center gap-2 rounded-xl border px-4 py-2.5 text-xs lg:hidden">
       <MonitorIcon class="size-4 shrink-0" />
-      <span>타임라인은 화면이 넓은 PC에서 보기 편해요. 모바일에서는 <span class="text-foreground font-medium">표</span> 보기를 추천해요.</span>
+      <span>모바일에서 큐를 빠르게 확인하려면 <span class="text-foreground font-medium">목록</span>으로 열어 보세요.</span>
     </div>
     <div class="mt-4 overflow-x-auto">
       <CueStudio
-        scenes={board.scenes}
+        scenes={model.scenes}
         tracks={board.tracks}
-        cues={board.cues}
+        cues={model.cues}
+        totalMs={model.totalMs}
         editableTrackIds={board.viewer.editableTrackIds}
         background={backgroundVideo}
+        {sceneVisuals}
+        {compositionSections}
+        {signedMediaUrls}
         canEditScript={canManage}
         onEditCue={onStudioEdit}
         onAddCue={canEditSomething ? (trackId, sceneId) => openCreateCue(trackId, sceneId ?? "") : undefined}
@@ -626,23 +832,24 @@
         onResizeCue={canEditSomething ? studioResizeCue : undefined}
         onReorderCue={canEditSomething ? studioReorderCue : undefined}
         onMoveCue={canEditSomething ? studioMoveCue : undefined}
-        onMoveBlock={canManage ? studioMoveBlock : undefined}
+        onMoveBlock={canManage && !model.composed ? studioMoveBlock : undefined}
         onOpenScript={openScriptScene}
       />
     </div>
-  {:else if board.cues.length === 0}
+  {:else if model.cues.length === 0}
     <div class="bg-card mt-4 rounded-2xl px-6 py-14 text-center">
-      <p class="font-semibold">아직 등록된 큐가 없습니다</p>
-      <p class="text-muted-foreground mt-1 text-sm">큐 추가 버튼으로 첫 큐를 등록해 보세요.</p>
+      <p class="font-semibold">아직 등록된 큐가 없어요</p>
+      <p class="text-muted-foreground mt-1 text-sm">{canEditSomething ? "큐 추가 버튼으로 첫 큐를 등록해 보세요." : "담당자가 큐를 등록하면 이곳에서 확인할 수 있어요."}</p>
     </div>
   {:else if onlyMine && mineCount === 0}
     <div class="bg-card mt-4 rounded-2xl px-6 py-14 text-center">
-      <p class="font-semibold">내 담당 큐가 없습니다</p>
-      <p class="text-muted-foreground mt-1 text-sm">담당 트랙에 큐를 추가해 보세요.</p>
+      <p class="font-semibold">내 담당 큐가 없어요</p>
+      <p class="text-muted-foreground mt-1 text-sm">{canEditSomething ? "담당 트랙에 큐를 추가해 보세요." : "담당 트랙 배정은 제작진에게 확인해 주세요."}</p>
     </div>
   {:else}
-    <!-- 표 (데스크톱) -->
-    <div class="bg-card mt-4 hidden overflow-x-auto rounded-2xl border md:block">
+    <!-- 표 (데스크톱) — 인쇄할 때는 이 표만 나온다 -->
+    <div class="print-area bg-card mt-4 hidden overflow-x-auto rounded-2xl border md:block">
+      <p class="print-only mb-2 hidden px-1 text-sm font-semibold">{title} 큐시트 · {new Date().toLocaleDateString("ko-KR")} 출력</p>
       <table class="w-full min-w-[720px] text-sm">
         <thead>
           <tr class="text-muted-foreground/80 border-b text-start text-[11px] font-bold tracking-wider uppercase">
@@ -671,6 +878,7 @@
               >
                 <td class="px-4 py-2.5 font-mono text-[13px] font-bold whitespace-nowrap tabular-nums" style={`color:${color};`}>
                   {cue.cueNumber}
+                  <span class="text-muted-foreground mt-1 block whitespace-nowrap text-xs font-normal">{formatTime(cue.startMs ?? 0)}</span>
                 </td>
                 <td class="px-3 py-2.5 whitespace-nowrap">
                   <span class="me-1.5 inline-block size-1.5 rounded-full align-[1px]" style={`background:${color};`}></span>
@@ -694,9 +902,9 @@
       </table>
       <p class="text-muted-foreground/60 border-t px-4 py-2 text-[11.5px]">
         {#if canEditSomething}
-          {onlyMine ? "흐린 행은 내 큐가 아닌 구간(맥락용)입니다 · " : ""}내 트랙 행만 눌러서 수정할 수 있습니다
+          {onlyMine ? "흐린 행은 내 큐가 아닌 구간(맥락용)이에요 · " : ""}내 트랙 행만 눌러서 수정할 수 있어요
         {:else}
-          큐시트는 읽기 전용입니다.
+          큐시트는 읽기 전용이에요.
         {/if}
       </p>
     </div>
@@ -712,13 +920,15 @@
               {@const mine = editableSet.has(cue.trackId)}
               <button
                 type="button"
-                class="bg-card flex items-start gap-4 rounded-2xl px-5 py-4 text-start transition-opacity {mine
+                class="bg-card flex min-w-0 items-start gap-4 rounded-2xl px-5 py-4 text-start transition-opacity {mine
                   ? 'hover:bg-accent/60 cursor-pointer transition-colors'
                   : 'cursor-default'} {onlyMine && !mine ? 'opacity-40' : ''}"
+                disabled={!mine}
                 onclick={() => openEditCue(cue)}
               >
                 <span class="w-10 shrink-0 pt-0.5 font-mono text-sm font-bold tabular-nums" style={`color: ${color};`}>
                   {cue.cueNumber}
+                  <span class="text-muted-foreground mt-1 block whitespace-nowrap text-xs font-normal">{formatTime(cue.startMs ?? 0)}</span>
                 </span>
                 <span class="min-w-0 flex-1">
                   <span class="flex flex-wrap items-center gap-2">
@@ -754,7 +964,7 @@
   <Dialog.Content class="max-h-[85dvh] overflow-y-auto sm:max-w-md">
     <Dialog.Header>
       <Dialog.Title>{editingCue ? "큐 수정" : "큐 추가"}</Dialog.Title>
-      <Dialog.Description>계기(트리거)와 실행할 내용을 짧고 분명하게 적습니다.</Dialog.Description>
+      <Dialog.Description>계기(트리거)와 실행할 내용을 짧고 분명하게 적어요.</Dialog.Description>
     </Dialog.Header>
     <form class="grid gap-4" onsubmit={saveCue}>
       <div class="grid gap-2">
@@ -882,12 +1092,12 @@
             class="border-input hover:bg-accent inline-flex h-9 shrink-0 cursor-pointer items-center rounded-md border px-3 text-xs font-medium whitespace-nowrap transition-colors {mediaUploading
               ? 'pointer-events-none opacity-50'
               : ''}"
-            title="영상(mp4·webm·mov) 또는 음원(mp3·wav·m4a·aac)을 올립니다"
+            title="영상(MP4) 또는 음원(mp3·wav·m4a·aac)을 올려요"
           >
             {mediaUploading ? "업로드 중…" : "파일 올리기"}
             <input
               type="file"
-              accept="video/mp4,video/webm,video/quicktime,audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/aac,audio/x-m4a"
+              accept="video/mp4,.mp4,audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/aac,audio/x-m4a"
               class="hidden"
               onchange={onPickCueMedia}
               disabled={mediaUploading}
@@ -919,15 +1129,33 @@
   </Dialog.Content>
 </Dialog.Root>
 
-<AiCueDraftDialog {pid} bind:open={aiOpen} onApplied={load} />
 
-<CueSheetSettingsDialog
-  {pid}
-  bind:open={tracksOpen}
-  tracks={board?.tracks ?? []}
-  cueCount={board?.cues.length ?? 0}
-  {canManage}
-  palette={PALETTE}
-  onReloaded={load}
-/>
+{#key pid}
+  <CueSheetSettingsDialog
+    {pid}
+    bind:open={tracksOpen}
+    tracks={board?.tracks ?? []}
+    cueCount={board?.cues.length ?? 0}
+    {canManage}
+    palette={PALETTE}
+    onReloaded={load}
+    askConfirmation={(options) => confirmation.ask(options)}
+  />
+{/key}
 
+{#if importOpen}
+  <ImportDialog {pid} onClose={() => (importOpen = false)} onDone={load} />
+{/if}
+
+<ConfirmDialog bind:this={confirmation} />
+
+<style>
+  @media print {
+    :global(body *) { visibility: hidden !important; }
+    :global(.print-area), :global(.print-area *) { visibility: visible !important; }
+    :global(.print-area) { position: absolute; inset: 0 0 auto 0; display: block !important; border: 0 !important; overflow: visible !important; background: white !important; color: black !important; }
+    :global(.print-area .print-only) { display: block !important; }
+    :global(.print-area table) { min-width: 0 !important; font-size: 11px; }
+    :global(.print-area tr) { break-inside: avoid; }
+  }
+</style>

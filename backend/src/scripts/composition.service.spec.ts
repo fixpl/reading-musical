@@ -29,6 +29,34 @@ function fixture() {
 }
 
 describe("composition service safety and restoration", () => {
+  test("text synchronization runs inside the revision-locked composition transaction", async () => {
+    const { tx, prisma } = fixture();
+    tx.performanceSection.findFirst.mockResolvedValue({ id: "root", productionId, sourceSceneId: "scene", scriptText: "기존", lyrics: "", parentId: null });
+    const sync = { states: jest.fn().mockResolvedValue(new Map([["root", "SYNCED"]])), push: jest.fn().mockResolvedValue({ created: 0, updated: 1, deleted: 0 }) };
+    const service = new CompositionService(prisma as unknown as PrismaService, {} as AssetsService, sync as never);
+    await expect(service.update(productionId, "root", { expectedRevision: 3, scriptText: "새 글" }, admin)).resolves.toMatchObject({ scriptSynced: true, revision: 4 });
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(sync.states).toHaveBeenCalledWith(tx, [expect.objectContaining({ id: "root" })]);
+    expect(sync.push).toHaveBeenCalledWith(tx, productionId, "root");
+    expect(tx.production.updateMany.mock.invocationCallOrder[0]).toBeLessThan(sync.states.mock.invocationCallOrder[0]);
+  });
+
+  test("sync failure rejects the transaction instead of reporting a partial successful save", async () => {
+    const { tx, prisma } = fixture();
+    tx.performanceSection.findFirst.mockResolvedValue({ id: "root", productionId, sourceSceneId: "scene", parentId: null });
+    const sync = { states: jest.fn().mockResolvedValue(new Map([["root", "SYNCED"]])), push: jest.fn().mockRejectedValue(new Error("sync failed")) };
+    const service = new CompositionService(prisma as unknown as PrismaService, {} as AssetsService, sync as never);
+    await expect(service.update(productionId, "root", { expectedRevision: 3, scriptText: "새 글" }, admin)).rejects.toThrow("sync failed");
+    expect(tx.activityLog.create).not.toHaveBeenCalled();
+  });
+
+  test("assigned producers can prepare an unpublished performance", async () => {
+    const { tx, service } = fixture();
+    tx.production.findFirst.mockResolvedValue({ id: productionId, visibility: "DRAFT" });
+    tx.membership.findFirst.mockResolvedValue({ roles: [{ role: "PRODUCER" }] });
+    await expect(service.create(productionId, { title: "준비 중 대본", expectedRevision: 0 }, { ...admin, platformRole: "MEMBER" })).resolves.toMatchObject({ id: "new", revision: 1 });
+  });
+
   test("restores a family without resetting child-relative offsets", async () => {
     const { tx, service } = fixture();
     tx.performanceSection.findFirst.mockResolvedValue({ id: "root", productionId, parentId: null, archiveBatchId: "family", startMs: 300000 });

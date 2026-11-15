@@ -179,6 +179,8 @@
   let realtimeSocket: ReadingSocket | null = null;
   let realtimeSocketKey = "";
   let realtimeReloading = false;
+  let accessEnded = false;
+  let workspaceEpoch = 0;
 
   const activeSession = $derived(workspace?.activeSession ?? null);
   const selectedRunSheet = $derived(
@@ -199,7 +201,10 @@
   const nextRunSheetItem = $derived(resolveNextRunSheetItem());
   const remainingItemCount = $derived(selectedRunSheet?.items.filter((item) => !item.completedAt).length ?? 0);
 
+  let disposed = false;
+
   onMount(() => {
+    disposed = false;
     void loadWorkspace();
     void connectReadingSocket();
     const timer = window.setInterval(() => {
@@ -208,13 +213,15 @@
       }
     }, 15000);
     return () => {
+      disposed = true;
+      workspaceEpoch += 1;
       window.clearInterval(timer);
       disconnectReadingSocket();
     };
   });
 
   async function connectReadingSocket() {
-    if (typeof window === "undefined" || !token) return;
+    if (typeof window === "undefined" || disposed || accessEnded || !token) return;
     const socketKey = token;
     if (realtimeSocket && realtimeSocketKey === socketKey) return;
     disconnectReadingSocket();
@@ -223,6 +230,7 @@
       realtimeStatus = "idle";
       realtimeMessage = "게스트 리딩 실시간 연결 중";
       const { io } = (await import("socket.io-client")) as SocketModule;
+      if (disposed || accessEnded || socketKey !== token) return;
       const socket = io(getWsBaseUrl(), {
         auth: { guestReadingToken: token },
         transports: ["websocket"],
@@ -232,37 +240,65 @@
       realtimeSocketKey = socketKey;
 
       socket.on("reading-session.connected", (payload: { room?: string }) => {
+        if (!isCurrentSocket(socket, socketKey)) return;
         realtimeStatus = "connected";
         realtimeMessage = `실시간 연결됨 · ${payload?.room ?? "reading-session"}`;
       });
       socket.on("connect_error", (error: Error) => {
+        if (!isCurrentSocket(socket, socketKey)) return;
         realtimeStatus = "fallback";
         realtimeMessage = `실시간 연결 실패, REST 갱신 유지 · ${error.message}`;
       });
       socket.on("notification.error", (payload: { message?: string }) => {
-        realtimeStatus = "error";
-        realtimeMessage = payload?.message || "게스트 리딩 실시간 연결을 확인하지 못했어요.";
+        if (!isCurrentSocket(socket, socketKey)) return;
+        // 게스트 소켓의 notification.error는 인증 거부·철회·만료·삭제 때만 전달된다.
+        endGuestAccess(payload?.message || "게스트 리딩 링크가 만료되었거나 회수됐어요.");
       });
       socket.on("disconnect", () => {
+        if (!isCurrentSocket(socket, socketKey)) return;
         if (realtimeStatus === "connected") {
           realtimeStatus = "fallback";
           realtimeMessage = "실시간 연결 해제, REST 갱신 유지";
         }
       });
-      socket.on("reading-session.event", handleRealtimeReadingEvent);
+      socket.on("reading-session.event", (event: ReadingRealtimeEvent) => {
+        if (isCurrentSocket(socket, socketKey)) handleRealtimeReadingEvent(event);
+      });
     } catch (error) {
+      if (disposed || accessEnded || socketKey !== token) return;
       realtimeStatus = "fallback";
       realtimeMessage = error instanceof Error ? `실시간 모듈 로드 실패 · ${error.message}` : "실시간 모듈 로드 실패";
     }
   }
 
+  function isCurrentSocket(socket: ReadingSocket, socketKey: string) {
+    return !disposed && !accessEnded && realtimeSocket === socket && realtimeSocketKey === socketKey && token === socketKey;
+  }
+
   function disconnectReadingSocket() {
-    realtimeSocket?.disconnect();
+    const socket = realtimeSocket;
     realtimeSocket = null;
     realtimeSocketKey = "";
+    socket?.disconnect();
+  }
+
+  function endGuestAccess(message: string) {
+    // 접근 종료 뒤 이미 진행 중인 REST 응답이 보호 내용을 다시 표시하지 못하게 한다.
+    accessEnded = true;
+    workspaceEpoch += 1;
+    workspace = null;
+    selectedItemId = "";
+    followCurrent = true;
+    realtimeReloading = false;
+    loading = false;
+    errorMessage = message;
+    realtimeStatus = "error";
+    realtimeMessage = message;
+    disconnectReadingSocket();
   }
 
   function handleRealtimeReadingEvent(event: ReadingRealtimeEvent) {
+    if (disposed || accessEnded) return;
     if (event.eventId && workspace?.event.id && event.eventId !== workspace.event.id) return;
     if (realtimeReloading) return;
     realtimeReloading = true;
@@ -272,23 +308,29 @@
   }
 
   async function loadWorkspace(silent = false) {
+    if (disposed || accessEnded) return;
+    const epoch = workspaceEpoch;
+    const currentToken = token;
     if (!silent) {
       loading = true;
       errorMessage = "";
     }
     try {
-      const next = await apiRequest<GuestReadingWorkspace>(`/guest-reading/${encodeURIComponent(token)}`);
+      const next = await apiRequest<GuestReadingWorkspace>(`/guest-reading/${encodeURIComponent(currentToken)}`);
+      if (disposed || accessEnded || epoch !== workspaceEpoch || currentToken !== token) return;
       workspace = next;
+      errorMessage = "";
       alignSelectedItem(next);
     } catch (error) {
-      if (error instanceof ApiError && error.status === 410) {
-        errorMessage = error.message || "게스트 리딩 링크가 만료되었거나 회수됐어요.";
+      if (disposed || accessEnded || epoch !== workspaceEpoch || currentToken !== token) return;
+      if (error instanceof ApiError && [401, 403, 404, 410].includes(error.status)) {
+        endGuestAccess(error.message || "게스트 리딩 링크가 만료되었거나 회수됐어요.");
       } else {
         errorMessage = error instanceof ApiError || error instanceof Error ? error.message : "게스트 리딩 정보를 불러오지 못했어요";
+        if (!silent) workspace = null;
       }
-      if (!silent) workspace = null;
     } finally {
-      loading = false;
+      if (!disposed && epoch === workspaceEpoch && currentToken === token) loading = false;
     }
   }
 
@@ -475,7 +517,7 @@
         <article>
           <span class="badge">조작 권한</span>
           <h2>없음</h2>
-          <p class="muted">페이지 동기화, Cue 발동, 완료 처리는 내부 진행자만 가능합니다.</p>
+          <p class="muted">페이지 동기화와 큐 실행, 완료 처리는 내부 진행자만 할 수 있어요.</p>
         </article>
       </section>
 
@@ -554,7 +596,7 @@
           {:else}
             <div class="empty-state">
               <h3>장면·음악 큐 기준 관람</h3>
-              <p class="muted">확정 진행표가 없어서 일정에 연결된 장면과 음악 큐를 표시합니다.</p>
+              <p class="muted">확정된 진행표가 없어 일정에 연결된 장면과 음악 큐를 보여줘요.</p>
               <div class="grid two">
                 <article>
                   <h4>장면</h4>

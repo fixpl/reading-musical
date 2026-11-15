@@ -1,6 +1,6 @@
 # 개발·DB·검증 가이드
 
-이 문서는 루트 `README.md`의 상세 안내입니다. 기본 개발 흐름은 `sh dev.sh`이며 운영 배포와 구분합니다. 현재 구현은 NestJS/Prisma 백엔드와 SvelteKit 프론트입니다. 기존 Python 예시와 달리 이 저장소의 AI 호출은 OpenAI JavaScript SDK를 사용합니다.
+이 문서는 루트 [README.md](README.md)의 상세 안내입니다. 정식 오픈 준비와 운영 적용 순서는 [LAUNCH_READINESS.md](LAUNCH_READINESS.md)를 따릅니다. 기본 개발 흐름은 `sh dev.sh`이며 운영 배포와 구분합니다. 현재 구현은 NestJS/Prisma 백엔드와 SvelteKit 프론트입니다. 기존 Python 예시와 달리 이 저장소의 AI 호출은 OpenAI JavaScript SDK를 사용합니다.
 
 ## 1. 로컬 실행기의 범위
 
@@ -47,8 +47,11 @@ DEV_BACKEND_PORT=3001 DEV_FRONTEND_PORT=5180 sh dev.sh
 | `PUBLIC_WS_URL` | 통합 실행에서 로컬 API origin + `/ws`로 지정 |
 | `APP_PUBLIC_URL`, `API_EXTERNAL_URL`, `CORS_ORIGINS` | 통합 실행에서 두 포트에 맞춰 지정 |
 | `NVIDIA_API_KEY` 등 | AI를 사용할 때만 서버에 설정. 프론트 전달 금지 |
+| `ASSET_STORAGE`, `R2_*` | R2 파일 저장 설정. 아래 저장 경로와 [운영 가이드](SITE_OPERATIONS.md#r2-파일-저장과-키-교체) 참고 |
 
-통합 실행은 두 서버를 `127.0.0.1`에 바인딩하며 주소·CORS·HTTP 개발용 쿠키 설정을 맞춥니다. `MAIL_TRANSPORT=json`, `RATE_LIMIT_TRUST_PROXY=false`, 로컬 asset 디렉터리를 사용합니다. 프론트 자식 프로세스에는 필요한 OS 변수와 프론트의 `PUBLIC_` 설정만 전달하며 백엔드 환경 전체를 넘기지 않습니다. **`PUBLIC_` 변수는 공개 정보이므로 어떤 비밀값도 넣지 마세요.**
+통합 실행은 두 서버를 `127.0.0.1`에 바인딩하며 주소·CORS·HTTP 개발용 쿠키 설정을 맞춥니다. `MAIL_TRANSPORT=json`, `RATE_LIMIT_TRUST_PROXY=false`를 사용하고 로컬 파일 디렉터리를 지정합니다. R2 설정이 완전하면 파일은 R2에 저장하므로 개발 화면의 업로드도 실제 버킷에 반영됩니다. 프론트 자식 프로세스에는 필요한 OS 변수와 프론트의 `PUBLIC_` 설정만 전달하며 백엔드 환경 전체를 넘기지 않습니다. **`PUBLIC_` 변수는 공개 정보이므로 어떤 비밀값도 넣지 마세요.**
+
+현재 개발 파일 저장 경로는 `attachment` 버킷의 `art-bridge/`다. `backend/.env`의 `R2_PROJECT_NAME=art-bridge`, `R2_LEGACY_PROJECT_NAMES=reading-musical`, 빈 `R2_KEY_PREFIX`를 사용한다. 새 파일만 새 경로에 저장하고 기존 `reading-musical/` 객체와 DB의 storageKey는 유지한다. 이전 프로젝트 목록은 같은 버킷·고정 prefix에서만 적용되며 경로·wildcard는 허용하지 않는다. root `.env`의 Cloudflare 관리 키는 앱에 전달하지 않는다.
 
 로컬 실행은 백엔드·프론트를 이 PC에서 실행한다는 의미입니다. 개발 DB는 다른 서버에 있어도 됩니다. 기본값에서는 원격 DB 연결 전에 중단하지만 `sh dev.sh --allow-remote-db` 또는 `backend/.env`의 `DEV_ALLOW_REMOTE_DB=true`로 개발용 원격 연결을 명시적으로 허용합니다. 옵션은 `check`·`preview`에도 적용됩니다. 터미널 환경변수는 `backend/.env`보다 우선하며 프론트 환경파일에서 이 권한을 설정할 수는 없습니다.
 
@@ -80,7 +83,7 @@ sh dev.sh dev --migrate
 | `npm --prefix backend run prisma:seed` | 테스트 계정·샘플 데이터 생성/갱신. 별도 명시 실행 |
 | `npm run backend:prisma:deploy` | 현재 환경의 DB에 migration 적용. 로컬 보호장치 없는 개별 명령이므로 대상 확인 필수 |
 
-`20260907180000_track_cue_start_time`은 `track_cues.start_ms` nullable 열과 시간 범위 제약을 추가하는 기존 migration입니다. 코드 변경, 테스트 통과, Prisma Client 생성은 이 migration의 DB 적용을 의미하지 않습니다. 이번 정리에서는 새 DB migration을 추가하거나 기존 DB를 변경하지 않았습니다.
+migration은 `backend/prisma/migrations/` 전체 목록과 대상 DB 이력을 대조합니다. 최근 공연 소개(`20261023090000_performance_showcase`)와 모집(`20261023120000_recruitment`)도 포함합니다. 코드·테스트·Client 생성은 대상 DB에 migration이 적용됐다는 뜻이 아닙니다. 개발 DB 적용 결과와 운영 DB 상태를 구분하며 이번 문서 정리에서는 DB를 변경하지 않았습니다.
 
 ### 선택: 로컬 데모 계정
 
@@ -147,7 +150,35 @@ LLM_EXTRA_BODY_JSON={"chat_template_kwargs":{"thinking":false}}
 
 모델별 지원 옵션을 확인하고 불필요한 추가 옵션은 `{}`로 비웁니다. JavaScript SDK에서는 추가 객체를 요청 최상위에 펼치므로 Python의 `extra_body` 래퍼를 그대로 중첩하지 않습니다. 다른 공급자를 사용할 때는 `NVIDIA_API_KEY`를 제거하고 `LLM_API_KEY` 및 맞는 `LLM_BASE_URL`을 설정합니다. 키가 다른 공급자로 전달되는 조합은 거부합니다.
 
+K-EXAONE 2.5는 `backend/.env`의 공통 `LLM_API_KEY`에 EXAONE에서 발급받은 키를 넣어 사용합니다. `NVIDIA_API_KEY`는 환경과 파일에서 비우거나 주석 처리하세요.
+
+```dotenv
+LLM_API_KEY=""
+LLM_BASE_URL=https://api.exaone.ai/v1
+LLM_MODEL=k-exaone_v2.5
+LLM_JSON_MODE=false
+LLM_EXTRA_BODY_JSON={"reasoning_effort":"low"}
+```
+
+저장 후 기존 실행 명령으로 서버를 재시작합니다. 이 설정은 대본 초안과 영상 매칭에 함께 적용됩니다. `api.exaone.ai`에 보내는 요청에서는 `LLM_SEED`를 생략합니다. 연결은 관리자 시스템 점검에서 확인하고, 가상 대본의 초안과 원문 시간표시는 대본 등록 화면에서 검토합니다.
+
+EXAONE 호출은 API 프로세스에서 한 번에 하나씩 처리하고, 새 호출은 최소 1초 간격으로 시작합니다. 분석이 진행 중이면 연결 점검은 새 요청을 보내지 않습니다. 공급자가 `429`를 반환하면 `Retry-After`와 설정된 재시도 횟수를 따릅니다. 전송 오류나 타임아웃이 난 호출은 공급자에서 아직 진행 중일 수 있어 자동 재전송하지 않습니다.
+
 AI 분석은 NDJSON 진행 응답이고 연결이 끊기면 공급자 요청을 취소합니다. 영속 작업 큐·재접속 복구는 현재 제공하지 않습니다. 실키 호출·요금·완료 시간은 오프라인 검사 대상이 아닙니다.
+
+### 대본·큐시트와 공연 도우미
+
+대본 분석은 `backend/src/ai/harness/skills/script-analysis/SKILL.md`를 읽어 기존 초안을 생성합니다. Word 큐시트는 서버에서 표로 읽고, 표와 대본이 명확히 일치하지 않는 항목에는 `cue-sheet-match` 스킬을 적용합니다. 운영 관리자 메뉴의 공연 도우미는 `production-operations` 스킬로 공연 준비 현황, 새 공연 초안, 기존 일정 변경을 다룹니다.
+
+큐시트 추가 대조와 공연 도우미는 기존 `LLM_API_KEY`, `LLM_BASE_URL=https://api.openai.com/v1`, `LLM_MODEL=gpt-6.1-terra`로 Responses API를 호출합니다. 공통 실행기는 `backend/src/ai/harness/responses-harness.ts`에 있습니다. 도구를 추가할 때 업무별 서비스에 입출력 범위와 설명을 등록하고, 기존 권한 검사를 거친 데이터만 반환합니다. 모델 호출은 요청마다 최대 네 번, 그중 도구 실행은 최대 세 번입니다. 대본·큐와 공연 등록은 검토 화면에서 사용자가 실행하는 기존 저장 경로를 사용합니다.
+
+서버의 `ResponsesHarness` 로그에는 실행 ID, 모델, 스킬 원본과 전달 지침의 해시, 도구 이름·결과·소요 시간, 종료 사유를 기록합니다. 스킬 해시는 사용한 버전을 확인하는 값입니다. 분석 정확도는 합성 원문과 결과를 대조해 확인합니다.
+
+공연 도우미에서 “달빛 우체국 최종 연습을 저녁 7시로 바꿔 줘”라고 입력하면 `find_schedule_events`가 기존 일정을 찾아 `preview_schedule_change`에 넘길 후보를 반환합니다. 후보가 여러 개면 화면에서 일정을 고릅니다. 시작 시간만 바꾸면 기존 소요 시간을 유지합니다. 서버가 한국 시간 기준 변경 전후, 참석 충돌, 기존에 참석·미정으로 답해 다시 응답할 사람을 표시합니다. 같은 일정에는 “그럼 저녁 7시 반으로”라고 이어서 요청할 수 있습니다.
+
+운영 관리자가 **이 시간으로 변경하고 알리기**를 누르면 본인에게 발급된 10분 유효 확인 토큰을 검증하고 기존 `ScheduleService.updateEvent`로 저장합니다. 확인 시점에 일정이나 응답이 바뀌었거나 충돌이 생겼으면 새 미리보기를 보여 줍니다. 일정, 재응답 상태, 변경 이력(`schedule.assistant_time_changed`)은 같은 트랜잭션에 기록합니다. 운영 메뉴 **활동 기록**에서 ‘공연 도우미에서 일정을 변경했어요’를 찾을 수 있습니다. 기존 알림·메일 큐를 통해 참석자에게 시간 변경을 알리고, 재응답 안내는 초기화된 사람에게 표시합니다.
+
+현재 운영 기능에는 OpenAI JavaScript SDK의 Responses API와 앱의 도구 실행기를 사용합니다. 모델은 요청을 해석하고 읽기 도구를 선택하며, NestJS가 권한·확인·충돌 검사와 변경 이력을 처리합니다. 도구 결과에서 참석자 정보와 확인 토큰은 서버가 화면으로 직접 보냅니다. 여러 단계의 세션, 다른 에이전트 인계가 실제 운영 요구로 생기면 Agents SDK의 runner와 sessions를 비교합니다. Codex SDK는 개발·테스트 자동화에 활용할 수 있습니다. [Agents 실행 방식](https://developers.openai.com/api/docs/guides/agents#compare-agent-runtime-options), [Codex SDK](https://learn.chatgpt.com/docs/codex-sdk)
 
 메일은 API 요청 중 직접 발송하지 않고 outbox에 저장합니다. 아래 worker는 자동 시작하지 않습니다. 개별 실행 시 통합 실행기의 환경 덮어쓰기를 상속하지 않으므로, **먼저 개발 DB와 메일 설정을 확인하세요.**
 
@@ -157,7 +188,19 @@ MAIL_TRANSPORT=json npm --prefix backend run mail:worker
 MAIL_TRANSPORT=json npm --prefix backend run attendance:reminders
 ```
 
-운영에서는 검증한 SMTP/Resend 설정과 worker 실행 정책을 별도로 적용합니다.
+운영에서는 메일 설정과 worker 실행 정책을 별도로 적용합니다. 현재 release preflight는 Resend를 요구합니다. `MAIL_SENDING_ENABLED` 기본값은 true이므로 실제 발송 보류·과거 큐 점검·승인된 수신자 검증 순서는 [SITE_OPERATIONS.md](SITE_OPERATIONS.md)를 따릅니다.
+
+신규 가입 이메일 인증은 `auth/registration/email/request`→`verify`에서 받은 일회성 `emailVerificationToken`을 최종 `auth/register`에 제출합니다. 실제 경로에는 공통 `/api/v1` prefix가 붙습니다. 기존 로그인·초대 수락·비밀번호 복구 API는 유지합니다. `20261023180000_registration_email` migration은 별도 challenge 테이블만 추가하며, 적용 여부는 HANDOFF 1절을 확인합니다. 인증번호/proof·비밀번호를 terminal·URL·fixture 출력에 남기지 않습니다.
+
+`npm --prefix backend run registration:purge`는 build 후 오래된 가입 인증 기록/메일 본문을 실제 정리하는 명령이며, `registration:purge:prod`는 기존 build를 사용합니다. 검사 명령이 아니므로 대상·보관 기준을 확인한 뒤 승인된 환경에서만 실행합니다. 메일 보류와 독립적이며 예약 작업은 자동 설치하지 않습니다.
+
+### 공연 일괄 등록 도구와 재시도 파일
+
+`scripts/setup-production.mjs`는 로컬 개발 서버에 관리자 로그인한 뒤 대본 추출·AI 초안 생성(`draft`) → 대본·역할·큐와 장·막 적용(`apply`) → 미디어 업로드·구간 연결(`media`) 순서로 실행하는 개발 도구다. 배포 설치기나 읽기 전용 검사가 아니다. 담당자가 대상 개발 DB·계정·공연과 AI 호출·파일 저장 범위를 먼저 확인한 뒤 실행한다. 완료한 단계와 업로드는 상태 파일을 기준으로 건너뛴다.
+
+`.local-dev/setup-production.json`은 Git에서 제외되지만 공연 ID뿐 아니라 AI가 추출한 대사·배우 이름·큐·파일명을 포함할 수 있는 개인·공연 자료다. 실행 담당자가 보관과 정리를 책임진다. 권한은 `0600`으로 저장하고 기존 파일도 같은 권한으로 제한한다. 재시도에 필요한 동안만 유지하고, 적용 결과와 미디어 연결 확인을 마쳤거나 작업 폐기를 결정한 뒤 담당자가 정리한다. 다른 공연을 구성하기 전에는 상태 파일의 공연 범위를 확인하고 이전 공연의 재시도 상태를 재사용하지 않는다. 도구와 이번 품질 검사는 실제 상태 파일을 자동 삭제하지 않는다.
+
+터미널에는 고정된 오류 code·단계·유효한 HTTP status와 집계 숫자만 출력한다. 대사·막/장면 제목·파일명·토큰·HTTP/AI 응답 원문은 출력하지 않는다. 전체 품질 검사에 포함된 `setup-production-contract.mjs`는 임시 디렉터리의 합성 설정·대본·미디어와 mock fetch만 사용하며 실제 환경 파일·기존 계정·AI·DB·R2에 접근하지 않는다.
 
 ## 7. 자동 검사와 실제 사용 검사
 
@@ -170,33 +213,34 @@ MAIL_TRANSPORT=json npm --prefix backend run attendance:reminders
 
 품질 검사의 Prisma URL은 validate/generate용 비운영 자리표시자입니다. migration/seed로 전달하지 않습니다. `qa:*`는 기존 로컬 스모크 도구이며 일부 파일은 저장소에서 제외되어 있으므로, 새 체크아웃의 공통 검사 진입점으로는 `test/check/build`를 사용합니다. 없는 스모크 파일이나 실행하지 않은 검사를 통과로 기록하지 않습니다.
 
-### 2026-09-08 확인된 결과
+### 현재 검증 기준
 
-| 검사 | 결과 |
-| --- | --- |
-| Prisma schema validate / Client generate | 통과. 실제 DB 상태 검사는 아님 |
-| NestJS build | 통과 |
-| Jest | 4 suites, 16 tests 통과 |
-| 로컬 실행기 Node 테스트 | 9 tests 통과. 외부 DB 차단, 포트 일치, 환경 분리, 명령/PID/문법 등 |
-| 타임라인·AI·달력·조직 권한 회귀검사 | 통과 |
-| Svelte client/server 문법 컴파일 | 5개 화면/컴포넌트, 경고 0개 |
-| 전체 `check` | 종료 코드 1. SvelteKit sync가 `frontend/.env` 읽기 `EPERM`으로 중단 |
-| 전체 `build` | 종료 코드 1. Vite가 동일 환경파일 읽기 `EPERM`으로 중단 |
-| 실제 DB 연결·migration 적용 상태 | 이 검사 환경에서는 미확인 |
-| 서버 2개 기동·포트 재사용·브라우저/모바일 실사용 | 미실행 |
+최신13차 로컬 검증(2026-10-24)은 check PASS(Svelte 오류·경고0)·test PASS(87 suites/905 tests와 Node 회귀223건)·build PASS다. 실제 관리자 등록·이미지 저장·목록·수정13항목과 QA 데이터 정리가 통과했다. 초기 브라우저 종료 promise 시간 초과는 기능 결과와 구분해 기록했다. 10차 이메일 인증에서는 승인 후 개발 DB 신규 테이블을 적용하고 PostgreSQL50건·합성 API 브라우저16건을 검증했다. 품질 검사는 설치 deps를 재사용한 별도 snapshot이며 fresh npm ci·GitHub CI·외부 메일·운영 결과는 아니다. 최종 결과·제약은 [HANDOFF.md](HANDOFF.md) 1절에서 확인한다.
 
-Svelte 문법 컴파일은 전체 타입 검사·번들·SSR/브라우저 통합 검사를 대체하지 않습니다. 비밀파일 보호를 우회하지 않았으며, 실제 DB를 변경하거나 seed·배포·Git 커밋/푸시를 실행하지 않았습니다.
+CI는 임시 PostgreSQL의 migration 검증 뒤 같은 `check/test/build`를 실행한다. GitHub에서 현재 후보 SHA가 실제 통과했는지는 별도 확인한다. `.gitignore` 예외에 포함된 회귀 파일과 새 source/migration도 후보 커밋에 모두 포함돼야 한다.
+
+배포 가능한 빌드는 운영 DB·복원·파일·메일·실물 기기 검증과 다르다. GitHub CI 성공, 로컬/개발 DB 결과, 운영 승인과 배포 결과를 따로 기록한다. 전체 검사는 Nest watch와 같은 dist에 쓰지 않도록 정상 종료 후 실행하거나 별도 작업 디렉터리에서 수행한다.
 
 ### 실제 개발 PC에서 확인할 흐름
 
 | 영역 | 확인할 시나리오 |
 | --- | --- |
 | 시작/종료 | `sh dev.sh check` 성공 → `sh dev.sh` → 두 주소 응답 → 재실행 시 기존 실행기 정리 → Ctrl+C 후 두 포트 종료 |
-| 공개 메인 | 모바일/PC 줄바꿈·가로 넘침, 예시 재생/정지/시점 이동, 화면 탭, FAQ 키보드 탐색, 문의 성공/오류/중복 클릭 |
-| 회원·권한 | 관리자/배우/스태프 로그인, 다른 공연·다른 조직 접근 거부, 배정 변경 반영 |
+| 공개 메인 | 모바일/PC 줄바꿈·가로 넘침, 게시된 공연만 노출·관객 상세/이미지, FAQ 키보드 탐색, 문의 성공/오류/중복 클릭 |
+| 회원·권한 | 관리자/배우/스태프 로그인, 다른 공연·다른 조직 접근 거부, 배정 변경 반영, 두 탭 계정 전환·지연 업로드 차단 |
+| 모집·공개 동의 | 타 조직 지원→승인→팀 연결, 철회·미선정·동시 정원, 사진 신규 수집/교체·이름/사진 공개·철회 |
 | 일정 | 개인 일정과 충돌, 동일 회원의 다른 공연 충돌, 경계가 맞닿은 일정, 자정·월 경계·다일 일정, 참석/불참 변경, 강행 사유 |
 | 시간표 | 원문 시간 보존, 시간 없는 항목 추정 표시, 2초 큐 유지, 시작/길이 저장 후 새로고침, 선택 대본·장면 반복 |
 | 실제 출력 | iOS/Android/PC 미디어 형식·권한·signed URL, 소리 켜기, 전체화면 자막/배경과 스태프 메모 미노출 |
+
+### UI 컴포넌트 Storybook
+
+`frontend/src/lib/components/ui` 컴포넌트의 변형·크기·다크·모바일 폭과 접근성은 Storybook으로 확인합니다.
+
+- 실행: `npm --prefix frontend run storybook` (http://127.0.0.1:6006). 상단 툴바에서 테마(다크/라이트)와 뷰포트(모바일 등)를 바꾸고, 접근성 탭에서 점검합니다.
+- 정적 빌드 확인: `npm --prefix frontend run build-storybook` (결과 `frontend/storybook-static/`은 git에서 제외).
+- 새 UI 컴포넌트를 `ui/` 아래에 추가하면 같은 폴더에 `<이름>.stories.svelte`도 함께 추가합니다. 스토리는 `apiRequest`·소켓·라우트 store에 의존하지 않고, 문구는 `~해요`체로 씁니다.
+- Storybook은 개발 도구라 `npm run build`와 배포 이미지에는 포함되지 않습니다.
 
 ## 8. 문제 해결과 운영 경계
 
@@ -213,4 +257,4 @@ Svelte 문법 컴파일은 전체 타입 검사·번들·SSR/브라우저 통합
 
 운영에서는 `backend/.env.production.example`과 `frontend/.env.production.example`을 참고해 배포 플랫폼 Secret/Env를 구성합니다. 운영용 비밀값, HTTPS/CORS, secure cookie, 저장소 경로 검증을 유지합니다. `dev.sh preview`는 운영 서버가 아니라 개발 DB를 사용하는 로컬 미리보기입니다.
 
-운영 DB를 백업하고 복구 가능성을 확인한 뒤 별도 release 단계에서 migration을 적용합니다. migration 대상 환경을 확인한 다음 백엔드/프론트를 배포하고 readiness·권한·로그인·일정·미디어·worker를 점검합니다. 기존 `docs/runbook/release.md`, `PRD.md`가 있는 로컬에서는 함께 참고할 수 있으나 저장소 공통 안내는 이 문서를 기준으로 합니다.
+운영 DB를 백업하고 복구 가능성을 확인한 뒤 승인된 release 단계에서 migration을 적용합니다. Docker API는 migration을 자동 실행하지 않고, 현재 Railpack API startCommand는 실행하므로 배포 방식을 먼저 확정합니다. migration 대상 환경을 확인한 다음 백엔드/프론트를 배포하고 readiness·권한·로그인·일정·미디어·worker를 점검합니다. 기존 `docs/runbook/release.md`, `PRD.md`가 있는 로컬에서는 함께 참고할 수 있으나 저장소 공통 안내는 이 문서를 기준으로 합니다.

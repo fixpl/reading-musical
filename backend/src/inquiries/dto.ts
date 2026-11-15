@@ -1,9 +1,13 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { InquiryStatus } from "@prisma/client";
-import { IsEmail, IsEnum, IsInt, IsOptional, IsString, Max, MaxLength, Min, MinLength } from "class-validator";
+import { IsEmail, IsEnum, IsInt, IsOptional, IsString, IsUUID, Max, MaxLength, Min, MinLength } from "class-validator";
 import { Type } from "class-transformer";
+import { InquiryConsentDto } from "../site/site.dto";
 
-export class CreateInquiryDto {
+export class CreateInquiryDto extends InquiryConsentDto {
+  @IsOptional() @IsString() @MaxLength(300) sourcePage?: string;
+  @IsOptional() @IsString() @MaxLength(120) sourceCampaign?: string;
+  @IsOptional() @IsString() @MaxLength(200) referrerHost?: string;
   @ApiProperty({ description: "기관·단체명" })
   @IsString()
   @MinLength(1)
@@ -47,6 +51,7 @@ export class CreateInquiryDto {
 }
 
 export class UpdateInquiryDto {
+  @IsInt() @Min(1) revision!: number;
   @ApiPropertyOptional({ enum: InquiryStatus })
   @IsOptional()
   @IsEnum(InquiryStatus)
@@ -66,6 +71,7 @@ export class UpdateInquiryDto {
 }
 
 export class ConvertInquiryDto {
+  @IsInt() @Min(1) revision!: number;
   @ApiPropertyOptional({ description: "생성할 공연 제목. 비우면 기관명 기준으로 만든다." })
   @IsOptional()
   @IsString()
@@ -74,7 +80,13 @@ export class ConvertInquiryDto {
   title?: string;
 }
 
+export class LinkInquiryDto { @IsInt() @Min(1) revision!: number; @IsUUID() productionId!: string; }
+export class ReplyInquiryDto { @IsInt() @Min(1) revision!: number; @IsString() @MinLength(1) @MaxLength(5000) body!: string; }
+
 export class AdminInquiryListQueryDto {
+  @IsOptional() @IsString() @MaxLength(100) q?: string;
+  @IsOptional() @IsUUID() productionId?: string;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(10000) page?: number;
   @ApiPropertyOptional({ enum: InquiryStatus })
   @IsOptional()
   @IsEnum(InquiryStatus)

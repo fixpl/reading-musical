@@ -1,8 +1,8 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import { PlatformRole, Prisma, ProductionRole } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import type { RequestUser } from "../common/types/request-user";
-import { CreateCueTrackDto, CreateTrackCueDto, ReorderTrackCueDto, UpdateCueTrackDto, UpdateTrackCueDto } from "./dto";
+import { CreateCueTrackDto, CreateTrackCueDto, ImportCuesDto, ReorderTrackCueDto, UpdateCueTrackDto, UpdateTrackCueDto } from "./dto";
 import { isProductionAdmin } from "../common/access/is-production-admin";
 
 const STAFF_ROLES: readonly ProductionRole[] = [
@@ -43,9 +43,9 @@ export class CueSheetService {
   constructor(private readonly prisma: PrismaService) {}
 
   async getBoard(productionId: string, user: RequestUser) {
-    const [production, tracks, cues, scenes, editableTrackIds, myCharacterIds] = await Promise.all([
+    const [production, tracks, cues, scenes, editableTrackIds, myCharacterIds, characters] = await Promise.all([
       this.prisma.production.findUnique({
-        where: { id: productionId },
+        where: { id: productionId, deletedAt: null },
         select: {
           id: true,
           title: true,
@@ -88,13 +88,15 @@ export class CueSheetService {
               order: true,
               startMs: true,
               durationMs: true,
+              updatedAt: true,
               character: { select: { id: true, name: true } }
             }
           }
         }
       }),
       this.resolveEditableTrackIds(productionId, user),
-      this.resolveMyCharacterIds(productionId, user)
+      this.resolveMyCharacterIds(productionId, user),
+      this.prisma.role.findMany({ where: { productionId }, select: { id: true, name: true }, orderBy: { name: "asc" } })
     ]);
 
     if (!production) {
@@ -106,10 +108,12 @@ export class CueSheetService {
       tracks,
       cues,
       scenes,
+      characters,
       viewer: {
         canManageTracks: editableTrackIds === "ALL",
         editableTrackIds: editableTrackIds === "ALL" ? tracks.map((track) => track.id) : editableTrackIds,
-        myCharacterIds
+        myCharacterIds,
+        myTrackIds: tracks.filter((track) => track.ownerMembership?.user.id === user.id).map((track) => track.id)
       }
     };
   }
@@ -127,15 +131,26 @@ export class CueSheetService {
     await this.assertOwnerMembership(productionId, dto.ownerMembershipId);
     const order = await this.nextTrackOrder(productionId);
 
-    return this.prisma.cueTrack.create({
-      data: {
-        productionId,
-        name: dto.name.trim(),
-        ownerMembershipId: dto.ownerMembershipId ?? null,
-        order
-      },
-      include: TRACK_INCLUDE
-    });
+    try {
+      return await this.prisma.cueTrack.create({
+        data: {
+          productionId,
+          name: dto.name.trim(),
+          ownerMembershipId: dto.ownerMembershipId ?? null,
+          order
+        },
+        include: TRACK_INCLUDE
+      });
+    } catch (error) {
+      throw this.mapTrackNameConflict(error);
+    }
+  }
+
+  private mapTrackNameConflict(error: unknown) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      return new ConflictException("같은 이름의 트랙이 있어요");
+    }
+    return error;
   }
 
   async createDefaultTracks(productionId: string, user: RequestUser) {
@@ -163,15 +178,19 @@ export class CueSheetService {
     await this.findTrackOrThrow(productionId, trackId);
     await this.assertOwnerMembership(productionId, dto.ownerMembershipId);
 
-    return this.prisma.cueTrack.update({
-      where: { id: trackId },
-      data: {
-        name: dto.name?.trim(),
-        ownerMembershipId: dto.ownerMembershipId === undefined ? undefined : dto.ownerMembershipId,
-        order: dto.order
-      },
-      include: TRACK_INCLUDE
-    });
+    try {
+      return await this.prisma.cueTrack.update({
+        where: { id: trackId },
+        data: {
+          name: dto.name?.trim(),
+          ownerMembershipId: dto.ownerMembershipId === undefined ? undefined : dto.ownerMembershipId,
+          order: dto.order
+        },
+        include: TRACK_INCLUDE
+      });
+    } catch (error) {
+      throw this.mapTrackNameConflict(error);
+    }
   }
 
   async removeTrack(productionId: string, trackId: string, user: RequestUser) {
@@ -179,6 +198,82 @@ export class CueSheetService {
     await this.findTrackOrThrow(productionId, trackId);
     await this.prisma.cueTrack.delete({ where: { id: trackId } });
     return { ok: true };
+  }
+
+  /**
+   * 엑셀(CSV) 큐시트 가져오기. 부서 이름이 기존 트랙과 같으면 그 트랙에, 없으면 새 트랙을 만들어 이어 붙인다.
+   * 장면은 제목이 같은(공백·대소문자 무시) 대본 장면에 연결하고, 못 찾으면 "장면 미지정"으로 둔다. dryRun이면 저장 없이 결과만 알려 준다.
+   */
+  async importCues(productionId: string, dto: ImportCuesDto, user: RequestUser) {
+    await this.assertStaff(productionId, user);
+    const norm = (value: string) => value.normalize("NFC").replace(/\s+/g, "").toLowerCase();
+    const [tracks, scenes, roles] = await Promise.all([
+      this.prisma.cueTrack.findMany({ where: { productionId }, orderBy: { order: "asc" } }),
+      this.prisma.scene.findMany({ where: { act: { script: { productionId, deletedAt: null } } }, select: { id: true, title: true } }),
+      this.prisma.role.findMany({ where: { productionId }, select: { id: true, name: true } })
+    ]);
+    const trackByName = new Map(tracks.map((track) => [norm(track.name), track]));
+    const sceneByTitle = new Map(scenes.map((scene) => [norm(scene.title), scene.id]));
+    const roleByName = new Map(roles.map((role) => [norm(role.name), role.id]));
+    const warnings: string[] = [];
+    const newTrackNames: string[] = [];
+    const plan = dto.rows.map((row, index) => {
+      const label = `${index + 1}번째 줄`;
+      const trackKey = norm(row.track);
+      if (!trackByName.has(trackKey) && !newTrackNames.some((name) => norm(name) === trackKey)) newTrackNames.push(row.track.trim());
+      const sceneId = row.scene?.trim() ? sceneByTitle.get(norm(row.scene)) ?? null : null;
+      if (row.scene?.trim() && !sceneId) warnings.push(`${label}: 장면 “${row.scene.trim()}”을 대본에서 찾지 못해 장면 미지정으로 가져옵니다.`);
+      const characterId = row.character?.trim() ? roleByName.get(norm(row.character)) ?? null : null;
+      if (row.character?.trim() && !characterId) warnings.push(`${label}: 출연 “${row.character.trim()}”이 배역 목록에 없어 비워 둡니다.`);
+      if (row.startMs != null && row.durationSec != null && row.startMs + row.durationSec * 1000 > 86_400_000) throw new BadRequestException(`${label}: 큐 종료 시각이 24시간을 넘습니다`);
+      return { row, trackKey, sceneId, characterId };
+    });
+    const summary = { total: plan.length, newTracks: newTrackNames, sceneLinked: plan.filter((item) => item.sceneId).length, warnings: warnings.slice(0, 50) };
+    if (dto.dryRun) return { ...summary, created: 0, dryRun: true };
+
+    const created = await this.prisma.$transaction(async (tx) => {
+      let nextTrackOrder = tracks.reduce((max, track) => Math.max(max, track.order + 1), 0);
+      const idByKey = new Map(tracks.map((track) => [norm(track.name), track.id]));
+      const nameByKey = new Map(tracks.map((track) => [norm(track.name), track.name]));
+      for (const name of newTrackNames) {
+        const track = await tx.cueTrack.create({ data: { productionId, name, order: nextTrackOrder++ } });
+        idByKey.set(norm(name), track.id); nameByKey.set(norm(name), name);
+      }
+      const counts = new Map<string, number>();
+      const orders = new Map<string, number>();
+      const taken = new Map<string, Set<string>>();
+      for (const [key, id] of idByKey) {
+        counts.set(id, await tx.trackCue.count({ where: { trackId: id, deletedAt: null } }));
+        const last = await tx.trackCue.findFirst({ where: { trackId: id, deletedAt: null }, orderBy: { order: "desc" }, select: { order: true } });
+        orders.set(id, (last?.order ?? -1) + 1);
+        taken.set(id, new Set((await tx.trackCue.findMany({ where: { trackId: id, deletedAt: null }, select: { cueNumber: true } })).map((cue) => cue.cueNumber)));
+        void key;
+      }
+      const rows: Prisma.TrackCueCreateManyInput[] = [];
+      for (const item of plan) {
+        const trackId = idByKey.get(item.trackKey)!;
+        const trackName = nameByKey.get(item.trackKey)!;
+        const count = (counts.get(trackId) ?? 0) + 1;
+        counts.set(trackId, count);
+        let cueNumber = item.row.cueNumber?.trim() || `${trackName.slice(0, 1)}${String(count).padStart(2, "0")}`;
+        const used = taken.get(trackId)!;
+        if (used.has(cueNumber)) cueNumber = `${trackName.slice(0, 1)}${String(count).padStart(2, "0")}`;
+        let guard = 0;
+        while (used.has(cueNumber) && guard++ < 1000) cueNumber = `${trackName.slice(0, 1)}${String(count + guard).padStart(2, "0")}`;
+        used.add(cueNumber);
+        const order = orders.get(trackId) ?? 0;
+        orders.set(trackId, order + 1);
+        rows.push({
+          productionId, trackId, sceneId: item.sceneId, cueNumber, order,
+          content: item.row.content.trim(), trigger: item.row.trigger?.trim() || null, note: item.row.note?.trim() || null,
+          characterId: item.characterId, durationSec: item.row.durationSec ?? null, startMs: item.row.startMs ?? null, authorId: user.id
+        });
+      }
+      await tx.trackCue.createMany({ data: rows });
+      await tx.activityLog.create({ data: { productionId, actorId: user.id, action: "cuesheet.import", entity: "Production", entityId: productionId, reason: "큐시트 CSV 가져오기", afterJson: { created: rows.length, newTracks: newTrackNames } } });
+      return rows.length;
+    });
+    return { ...summary, created, dryRun: false };
   }
 
   async createCue(productionId: string, trackId: string, dto: CreateTrackCueDto, user: RequestUser) {
@@ -232,20 +327,23 @@ export class CueSheetService {
       dto.startMs === undefined ? cue.startMs : dto.startMs,
       dto.durationSec === undefined ? cue.durationSec : dto.durationSec
     );
-    return this.prisma.trackCue.update({
-      where: { id: cue.id },
-      data: {
-        cueNumber: dto.cueNumber?.trim(),
-        trigger: dto.trigger === undefined ? undefined : dto.trigger?.trim() || null,
-        content: dto.content?.trim(),
-        note: dto.note === undefined ? undefined : dto.note?.trim() || null,
-        sceneId: dto.sceneId === undefined ? undefined : dto.sceneId,
-        characterId: dto.characterId === undefined ? undefined : dto.characterId,
-        durationSec: dto.durationSec === undefined ? undefined : dto.durationSec,
-        startMs: dto.startMs === undefined ? undefined : dto.startMs,
-        assetId: dto.assetId === undefined ? undefined : dto.assetId
-      },
-      include: CUE_INCLUDE
+    return this.prisma.$transaction(async tx => {
+      const updated = await tx.trackCue.updateMany({
+        where: { id: cue.id, productionId, deletedAt: null, updatedAt: dto.expectedUpdatedAt ? new Date(dto.expectedUpdatedAt) : cue.updatedAt },
+        data: {
+          cueNumber: dto.cueNumber?.trim(),
+          trigger: dto.trigger === undefined ? undefined : dto.trigger?.trim() || null,
+          content: dto.content?.trim(),
+          note: dto.note === undefined ? undefined : dto.note?.trim() || null,
+          sceneId: dto.sceneId === undefined ? undefined : dto.sceneId,
+          characterId: dto.characterId === undefined ? undefined : dto.characterId,
+          durationSec: dto.durationSec === undefined ? undefined : dto.durationSec,
+          startMs: dto.startMs === undefined ? undefined : dto.startMs,
+          assetId: dto.assetId === undefined ? undefined : dto.assetId
+        }
+      });
+      if (updated.count !== 1) throw new ConflictException("다른 사용자가 이 큐를 수정했습니다. 입력 내용을 보관한 뒤 최신 큐를 불러와 다시 적용하세요.");
+      return tx.trackCue.findUniqueOrThrow({ where: { id: cue.id }, include: CUE_INCLUDE });
     });
   }
 

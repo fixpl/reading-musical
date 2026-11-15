@@ -17,12 +17,14 @@
     links = null; error = ""; zoom = 100;
     async function load() {
       try {
-        const result = await apiRequest<{ url: string; expiresAt: string }>(`/assets/${id}/url`);
+        const result = await apiRequest<{ url: string; expiresAt: string; downloadUrl?: string }>(`/assets/${id}/url`);
         if (!active) return;
         links = referenceUrls(result.url);
+        // 클라우드 저장소(R2)는 내려받기 방식이 서명에 들어가 있어 서버가 내려받기용 주소를 따로 준다.
+        if (result.downloadUrl) links = { open: links.open, download: referenceUrls(result.downloadUrl).open };
         const expires = Date.parse(result.expiresAt);
         timer = setTimeout(() => void load(), Number.isFinite(expires) ? Math.max(1000, expires - Date.now() - 15000) : 540000);
-      } catch (failure) { if (active) { links = null; error = failure instanceof Error ? failure.message : "파일을 열지 못했습니다."; } }
+      } catch (failure) { if (active) { links = null; error = failure instanceof Error ? failure.message : "파일을 열지 못했어요."; } }
     }
     void load();
     return () => { active = false; if (timer) clearTimeout(timer); };
@@ -38,14 +40,14 @@
     </div>
   </div>
   {#if error}<div role="alert" class="space-y-3 p-4 text-sm"><p class="text-destructive">{error}</p><Button variant="outline" size="sm" onclick={() => retry += 1}>파일 다시 불러오기</Button></div>
-  {:else if !links}<p class="p-6 text-sm text-muted-foreground" role="status">원본 파일을 준비하고 있습니다.</p>
+  {:else if !links}<p class="p-6 text-sm text-muted-foreground" role="status">원본 파일을 준비하고 있어요.</p>
   {:else if asset.mime === 'application/pdf'}
     <iframe src={links.open} title={`${assetName(asset)} PDF 원본`} referrerpolicy="no-referrer" class="h-[60vh] min-h-80 w-full border-0 bg-white"></iframe>
-    <p class="p-3 text-xs leading-relaxed text-muted-foreground">브라우저 PDF 뷰어를 사용합니다. 모바일에서 표시되지 않으면 ‘원본 열기’ 또는 ‘내려받기’를 이용하세요. 이미지로 된 악보도 텍스트 추출 없이 보관됩니다.</p>
+    <p class="p-3 text-xs leading-relaxed text-muted-foreground">브라우저의 PDF 뷰어로 보여줘요. 모바일에서 보이지 않으면 ‘원본 열기’ 또는 ‘내려받기’를 이용해 주세요. 이미지로 된 악보도 텍스트를 추출하지 않고 원본 그대로 보관해요.</p>
   {:else if ['image/png', 'image/jpeg', 'image/webp'].includes(asset.mime)}
     <label class="flex items-center gap-2 border-b p-3 text-xs">이미지 확대<select bind:value={zoom} class="rounded-md border bg-background p-2"><option value={100}>화면에 맞춤</option><option value={150}>150%</option><option value={200}>200%</option></select></label>
-    <div class="max-h-[65vh] overflow-auto bg-muted/20 p-2"><img src={links.open} alt={assetName(asset)} referrerpolicy="no-referrer" style:width={`${zoom}%`} style:max-width="none" class="h-auto" onerror={() => error = '이미지를 읽지 못했습니다. 업로드 상태를 확인하거나 원본을 다시 불러오세요.'} /></div>
+    <div class="max-h-[65vh] overflow-auto bg-muted/20 p-2"><img src={links.open} alt={assetName(asset)} referrerpolicy="no-referrer" style:width={`${zoom}%`} style:max-width="none" class="h-auto" onerror={() => error = '이미지를 읽지 못했어요. 업로드 상태를 확인하거나 원본을 다시 불러와 주세요.'} /></div>
   {:else if asset.mime === 'text/plain'}
     <iframe src={links.open} title={`${assetName(asset)} 텍스트 원본`} sandbox="" referrerpolicy="no-referrer" class="h-[45vh] min-h-64 w-full border-0 bg-white"></iframe>
-  {:else}<div class="space-y-2 p-6 text-sm"><p>이 문서는 원본 파일로 제공합니다.</p><p class="text-muted-foreground">‘내려받기’로 저장한 뒤 문서 프로그램에서 확인하세요. 웹 미리보기는 PDF와 이미지, TXT를 지원합니다.</p></div>{/if}
+  {:else}<div class="space-y-2 p-6 text-sm"><p>이 문서는 원본 파일로 제공해요.</p><p class="text-muted-foreground">‘내려받기’로 저장한 뒤 문서 프로그램에서 확인해 주세요. 웹 미리보기는 PDF·이미지·TXT 파일을 지원해요.</p></div>{/if}
 </section>

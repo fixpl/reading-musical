@@ -1,0 +1,21 @@
+{
+  "name": "아트브릿지",
+  "short_name": "아트브릿지",
+  "description": "리딩뮤지컬 공연에 참여하고, 공연 안에서 미리 연습하고 일정을 확인합니다",
+  "lang": "ko",
+  "start_url": "/app?source=pwa",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#fafafa",
+  "theme_color": "#f59e0b",
+  "icons": [
+    { "src": "/artbridge-icon-v3-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/artbridge-icon-v3-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/artbridge-maskable-v3-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "내 일정", "url": "/app/schedule?source=pwa" },
+    { "name": "알림", "url": "/app/notifications?source=pwa" }
+  ]
+}

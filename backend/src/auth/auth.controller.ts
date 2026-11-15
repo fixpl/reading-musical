@@ -7,12 +7,27 @@ import { JwtAuthGuard } from "../common/guards/jwt-auth.guard";
 import { RateLimitGuard } from "../common/guards/rate-limit.guard";
 import type { RequestUser } from "../common/types/request-user";
 import { AuthService } from "./auth.service";
-import { ForgotPasswordDto, LoginDto, RefreshDto, RegisterDto, ResetPasswordDto } from "./dto";
+import { ChangePasswordDto, ForgotPasswordDto, LoginDto, RefreshDto, RegisterDto, RequestRegistrationEmailDto, ResetPasswordDto, VerifyRegistrationEmailDto } from "./dto";
+import { RegistrationEmailService } from "./registration-email.service";
 
 @ApiTags("auth")
 @Controller("auth")
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(private readonly authService: AuthService, private readonly registrationEmail: RegistrationEmailService) {}
+
+  @UseGuards(RateLimitGuard)
+  @RateLimit({ name: "auth.registration.email.request", defaultLimit: 20, defaultWindowMs: 60_000, keyMode: "ip" })
+  @Post("registration/email/request")
+  requestRegistrationEmail(@Body() dto: RequestRegistrationEmailDto) {
+    return this.registrationEmail.request(dto);
+  }
+
+  @UseGuards(RateLimitGuard)
+  @RateLimit({ name: "auth.registration.email.verify", defaultLimit: 60, defaultWindowMs: 60_000, keyMode: "ip" })
+  @Post("registration/email/verify")
+  verifyRegistrationEmail(@Body() dto: VerifyRegistrationEmailDto) {
+    return this.registrationEmail.verify(dto);
+  }
 
   @UseGuards(RateLimitGuard)
   @RateLimit({
@@ -93,6 +108,22 @@ export class AuthController {
   @Post("password/reset")
   resetPassword(@Body() dto: ResetPasswordDto) {
     return this.authService.resetPassword(dto);
+  }
+
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RateLimitGuard)
+  @RateLimit({
+    name: "auth.password.change",
+    defaultLimit: 10,
+    defaultWindowMs: 60_000,
+    limitEnv: "RATE_LIMIT_PASSWORD_CHANGE_LIMIT",
+    windowMsEnv: "RATE_LIMIT_PASSWORD_CHANGE_WINDOW_MS"
+  })
+  @Post("password/change")
+  async changePassword(@CurrentUser() user: RequestUser, @Body() dto: ChangePasswordDto, @Res({ passthrough: true }) response: Response) {
+    const result = await this.authService.changePassword(user.id, dto);
+    this.authService.attachRefreshCookie(response, result.tokens.refreshToken);
+    return result;
   }
 
   @ApiBearerAuth()

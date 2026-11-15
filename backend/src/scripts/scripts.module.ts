@@ -13,10 +13,13 @@ import { ScriptNotificationsService } from "./script-notifications.service";
 import { ScriptSnapshotService } from "./script-snapshot.service";
 import { CompositionController } from "./composition.controller";
 import { CompositionService } from "./composition.service";
+import { RehearsalController } from "./rehearsal.controller";
+import { RehearsalService } from "./rehearsal.service";
+import { SectionSyncService } from "./section-sync.service";
 
 @Module({
   imports: [PrismaModule, JwtModule.register({}), AssetsModule, NotificationsModule, MailModule],
-  controllers: [ScriptsController, CompositionController],
+  controllers: [ScriptsController, CompositionController, RehearsalController],
   providers: [
     ScriptsService,
     ScriptEntityLookupService,
@@ -24,6 +27,8 @@ import { CompositionService } from "./composition.service";
     ScriptNotificationsService,
     ScriptImportService,
     CompositionService,
+    RehearsalService,
+    SectionSyncService,
     RolesGuard
   ]
 })

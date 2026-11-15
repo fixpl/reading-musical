@@ -66,7 +66,7 @@ describe("schedule conflict and permission regressions", () => {
   });
 
   it("requires valid ranges and uses exclusive calendar boundaries", async () => {
-    const { prisma, internal, service, range } = fixture();
+    const { prisma, internal, service, range, notificationsService } = fixture();
     expect(() => internal.parseRange("invalid", range.endAt.toISOString())).toThrow(BadRequestException);
     expect(() => internal.parseRange(range.startAt.toISOString(), range.startAt.toISOString())).toThrow(BadRequestException);
     jest.spyOn(internal, "assertMembership").mockResolvedValue(null);
@@ -102,5 +102,53 @@ describe("schedule conflict and permission regressions", () => {
     expect(errors.map((error) => error.property)).toEqual(expect.arrayContaining(["title", "attendeeMembershipIds"]));
     const attendance = plainToInstance(UpsertAttendanceDto, { attendances: [{ membershipId: id }, { membershipId: id }] });
     expect((await validate(attendance)).some((error) => error.property === "attendances")).toBe(true);
+  });
+
+  it("saves bulk attendance in one transaction so a failing row leaves nothing behind", async () => {
+    const { prisma, internal, service, range, notificationsService } = fixture();
+    const tx = { attendance: { upsert: jest.fn().mockResolvedValueOnce({ id: "a1" }).mockRejectedValueOnce(new Error("db down")) } };
+    const transaction = jest.fn(async (callback: (client: typeof tx) => Promise<unknown>, _options?: { timeout: number }) => callback(tx));
+    (prisma as any).$transaction = transaction;
+    jest.spyOn(internal, "assertEvent").mockResolvedValue({ id: "e", title: "합주", type: "REHEARSAL", ...range, attendances: [] });
+    jest.spyOn(internal, "getUserMembership").mockResolvedValue(null);
+    jest.spyOn(internal, "assertEditPermission").mockResolvedValue(undefined);
+    jest.spyOn(internal, "assertMembershipIds").mockResolvedValue(undefined);
+    jest.spyOn(internal, "findConflicts").mockResolvedValue([]);
+    const forced = jest.spyOn(notificationsService, "handleForcedAttendances").mockResolvedValue({ logs: 0, notifications: 0, emailDeliveries: 0 });
+    await expect(service.upsertAttendance("p", "e", { membershipIds: ["m1", "m2"] } as never, { id: "u" } as never)).rejects.toThrow("db down");
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(transaction.mock.calls[0][1]).toEqual({ timeout: 20000 });
+    expect(tx.attendance.upsert).toHaveBeenCalledTimes(2);
+    expect(forced).not.toHaveBeenCalled();
+  });
+
+  it("replaces event scenes and cues with a single createMany instead of per-row creates", async () => {
+    const { prisma, internal, service } = fixture();
+    const eventScene = { deleteMany: jest.fn().mockReturnValue("del-scene"), createMany: jest.fn().mockReturnValue("create-scene"), create: jest.fn() };
+    const eventMusicCue = { deleteMany: jest.fn().mockReturnValue("del-cue"), createMany: jest.fn().mockReturnValue("create-cue"), create: jest.fn() };
+    const transaction = jest.fn().mockResolvedValue([]);
+    Object.assign(prisma, { eventScene, eventMusicCue, $transaction: transaction });
+    jest.spyOn(internal, "assertEvent").mockResolvedValue({ id: "e", type: "REHEARSAL" });
+    jest.spyOn(internal, "assertEditPermission").mockResolvedValue(undefined);
+    jest.spyOn(internal, "assertScenes").mockResolvedValue(undefined);
+    jest.spyOn(internal, "assertMusicCues").mockResolvedValue(undefined);
+    await service.putEventScenes("p", "e", { sceneIds: ["s1", "s2"] }, {} as never);
+    await service.putEventMusicCues("p", "e", { musicCueIds: ["c1", "c2"] }, {} as never);
+    expect(eventScene.create).not.toHaveBeenCalled();
+    expect(eventMusicCue.create).not.toHaveBeenCalled();
+    expect(eventScene.createMany).toHaveBeenCalledWith({ data: [{ eventId: "e", sceneId: "s1" }, { eventId: "e", sceneId: "s2" }], skipDuplicates: true });
+    expect(eventMusicCue.createMany).toHaveBeenCalledWith({ data: [{ eventId: "e", cueId: "c1" }, { eventId: "e", cueId: "c2" }], skipDuplicates: true });
+    expect(transaction.mock.calls[0][0]).toEqual(["del-scene", "create-scene"]);
+  });
+
+  it("limits ID lists: DTO arrays to 500 and suggest query ids to 200", async () => {
+    const ids = Array.from({ length: 501 }, (_, index) => `123e4567-e89b-42d3-a456-${String(index).padStart(12, "0")}`);
+    const event = plainToInstance(CreateScheduleEventDto, { title: "합주", startAt: "2026-09-08T10:00:00+09:00", endAt: "2026-09-08T11:00:00+09:00", attendeeMembershipIds: ids });
+    expect((await validate(event)).some((error) => error.property === "attendeeMembershipIds")).toBe(true);
+    const attendance = plainToInstance(UpsertAttendanceDto, { attendances: ids.map((membershipId) => ({ membershipId })) });
+    expect((await validate(attendance)).some((error) => error.property === "attendances")).toBe(true);
+    const { internal } = fixture();
+    expect(internal.splitIds(ids.slice(0, 200).join(","))).toHaveLength(200);
+    expect(() => internal.splitIds(ids.slice(0, 201).join(","))).toThrow(BadRequestException);
   });
 });

@@ -1,22 +1,27 @@
 import { Body, Controller, Get, Param, Post, Put, Query, Req, Res, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import type { Request, Response } from "express";
+import { createReadStream } from "node:fs";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
 import { JwtAuthGuard } from "../common/guards/jwt-auth.guard";
 import type { RequestUser } from "../common/types/request-user";
 import { AssetsService } from "./assets.service";
-import { CreateAssetDto } from "./dto";
+import { AssetPurpose, CreateAssetDto } from "./dto";
+import { SiteService } from "../site/site.service";
 import { attachmentDisposition } from "./attachment-response";
+import { parseByteRange } from "./asset-byte-range";
 
 @ApiTags("assets")
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard)
 @Controller("assets")
 export class AssetsController {
-  constructor(private readonly assetsService: AssetsService) {}
+  constructor(private readonly assetsService: AssetsService, private readonly site: SiteService) {}
 
   @Post()
-  createAsset(@Body() dto: CreateAssetDto, @CurrentUser() user: RequestUser) {
+  async createAsset(@Body() dto: CreateAssetDto, @CurrentUser() user: RequestUser) {
+    // Consent is checked before issuing upload authorization, not only when linking the photo.
+    if (dto.purpose === AssetPurpose.PROFILE_PHOTO) await this.site.recordProfileConsent(user.id, dto, "PROFILE_PHOTO");
     return this.assetsService.createAsset(dto, user);
   }
 
@@ -57,18 +62,31 @@ export class AssetObjectsController {
     @Query("action") action: string | undefined,
     @Query("expires") expires: string | undefined,
     @Query("signature") signature: string | undefined,
+    @Req() request: Request,
     @Res() response: Response,
     @Query("download") download?: string
   ) {
     await this.assetsService.assertMockObjectAccess(assetId, "download", { action, expires, signature });
-    const object = await this.assetsService.readMockObject(assetId);
+    const object = await this.assetsService.getMockObjectInfo(assetId);
     response.setHeader("x-reading-musical-asset-id", assetId);
     response.setHeader("content-type", object.asset.mime === "text/plain" ? "text/plain; charset=utf-8" : object.asset.mime);
     response.setHeader("content-disposition", attachmentDisposition(object.asset, download === "1"));
     response.setHeader("x-content-type-options", "nosniff");
     response.setHeader("cache-control", "private, no-store");
-    response.setHeader("content-length", String(object.sizeBytes));
-    response.status(200).send(object.body);
+    response.setHeader("accept-ranges", "bytes");
+    const range = parseByteRange(request.headers["if-range"] ? undefined : request.headers.range, object.sizeBytes);
+    if (range === "unsatisfiable") {
+      response.setHeader("content-range", `bytes */${object.sizeBytes}`);
+      response.status(416).end();
+      return;
+    }
+    if (range) response.setHeader("content-range", `bytes ${range.start}-${range.end}/${object.sizeBytes}`);
+    response.setHeader("content-length", String(range ? range.end - range.start + 1 : object.sizeBytes));
+    response.status(range ? 206 : 200);
+    const stream = createReadStream(object.filePath, range ?? undefined);
+    stream.on("error", (error) => response.destroy(error));
+    response.on("close", () => stream.destroy());
+    stream.pipe(response);
   }
 
   private async readRequestBody(request: Request) {

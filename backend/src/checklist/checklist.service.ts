@@ -19,7 +19,6 @@ import {
   UpdateChecklistStatusDto
 } from "./dto";
 import { activeChecklistTemplateSeeds, CHECKLIST_PHASE_ORDER } from "./checklist-template-seed";
-import { isPlatformAdmin } from "../common/access/is-production-admin";
 import { assertProductionMembership } from "../common/access/assert-production-membership";
 
 const PHASE_ORDER = [...CHECKLIST_PHASE_ORDER];
@@ -104,7 +103,7 @@ export class ChecklistService {
       production,
       myMembershipId,
       myRoles: this.rolesOf(membership),
-      canEdit: this.isEditor(user, membership),
+      canEdit: this.isEditor(membership),
       phases: sortedPhases,
       memberships,
       events,
@@ -147,7 +146,7 @@ export class ChecklistService {
         eventId: dto.eventId ?? null,
         linkedResourceType: dto.linkedResourceType ?? null,
         linkedResourceId: dto.linkedResourceId?.trim() || null,
-        assignments: { create: membershipIds.map((membershipId) => ({ membershipId })) }
+        assignments: { createMany: { data: membershipIds.map((membershipId) => ({ membershipId })), skipDuplicates: true } }
       },
       include: this.itemInclude()
     });
@@ -245,7 +244,7 @@ export class ChecklistService {
 
     await this.prisma.$transaction([
       this.prisma.checklistAssignment.deleteMany({ where: { itemId } }),
-      ...dto.membershipIds.map((membershipId) => this.prisma.checklistAssignment.create({ data: { itemId, membershipId } }))
+      this.prisma.checklistAssignment.createMany({ data: dto.membershipIds.map((membershipId) => ({ itemId, membershipId })), skipDuplicates: true })
     ]);
 
     const updated = await this.assertItem(productionId, itemId);
@@ -263,7 +262,7 @@ export class ChecklistService {
   async updateStatus(productionId: string, itemId: string, dto: UpdateChecklistStatusDto, user: RequestUser) {
     const membership = await this.assertMembership(productionId, user, VIEW_ROLES);
     const item = await this.assertItem(productionId, itemId);
-    if (!this.canWorkOnItem(user, membership, item)) {
+    if (!this.canWorkOnItem(membership, item)) {
       throw new ForbiddenException("담당 항목만 상태를 변경할 수 있어요");
     }
     if (item.status === ChecklistStatus.WAITING_APPROVAL && dto.status === ChecklistStatus.DONE) {
@@ -313,7 +312,7 @@ export class ChecklistService {
     if (item.status !== ChecklistStatus.WAITING_APPROVAL) {
       throw new BadRequestException("승인 대기 상태의 항목만 승인할 수 있어요");
     }
-    if (!this.canApproveItem(user, membership, item)) {
+    if (!this.canApproveItem(membership, item)) {
       throw new ForbiddenException("이 항목을 승인할 권한이 없어요");
     }
     if (dto.decision === "REJECTED" && !dto.reviewNote?.trim()) {
@@ -472,12 +471,12 @@ export class ChecklistService {
     return requested;
   }
 
-  private canWorkOnItem(user: RequestUser, membership: MembershipContext | null, item: ChecklistItemDetail) {
-    return isPlatformAdmin(user) || this.isEditor(user, membership) || this.isAssignedToItem(item, membership);
+  private canWorkOnItem(membership: MembershipContext | null, item: ChecklistItemDetail) {
+    return this.isEditor(membership) || this.isAssignedToItem(item, membership);
   }
 
-  private canApproveItem(user: RequestUser, membership: MembershipContext | null, item: ChecklistItemDetail) {
-    if (isPlatformAdmin(user) || this.isEditor(user, membership)) {
+  private canApproveItem(membership: MembershipContext | null, item: ChecklistItemDetail) {
+    if (this.isEditor(membership)) {
       return true;
     }
     const roles = this.rolesOf(membership);
@@ -490,8 +489,9 @@ export class ChecklistService {
     return false;
   }
 
-  private isEditor(user: RequestUser, membership: MembershipContext | null) {
-    return isPlatformAdmin(user) || this.rolesOf(membership).some((role) => EDIT_ROLES.includes(role));
+  private isEditor(membership: MembershipContext | null) {
+    // null은 assertMembership이 해당 공연의 관리자 권한을 확인한 경우에만 반환한다.
+    return membership === null || this.rolesOf(membership).some((role) => EDIT_ROLES.includes(role));
   }
 
   private isAssignedToItem(item: ChecklistItemDetail, membership: MembershipContext | null) {

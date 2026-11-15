@@ -1,5 +1,7 @@
-import { CanActivate, ExecutionContext, ForbiddenException, Injectable } from "@nestjs/common";
+import { CanActivate, ExecutionContext, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import { Reflector } from "@nestjs/core";
+import { PATH_METADATA } from "@nestjs/common/constants";
+import { ALLOW_DELETED_PRODUCTION } from "../decorators/allow-deleted-production.decorator";
 import type { PlatformRole, ProductionRole } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { ERR_FORBIDDEN_DEFAULT } from "../constants/error-messages";
@@ -30,11 +32,20 @@ export class RolesGuard implements CanActivate {
       context.getClass()
     ]);
 
+    const request = context.switchToHttp().getRequest<RequestLike>();
+    const controllerPath = this.reflector.get<string>(PATH_METADATA, context.getClass());
+    const scopedId = request.params?.productionId ?? request.params?.pid
+      ?? ((controllerPath === "productions" || productionRoles?.length) ? request.params?.id : undefined);
+    const allowDeleted = this.reflector.getAllAndOverride<boolean>(ALLOW_DELETED_PRODUCTION, [context.getHandler(), context.getClass()]);
+    if (scopedId && !allowDeleted) {
+      const production = await this.prisma.production.findUnique({ where: { id: scopedId }, select: { deletedAt: true } });
+      if (production?.deletedAt) throw new NotFoundException("공연을 찾을 수 없습니다.");
+    }
+
     if (!platformRoles?.length && !productionRoles?.length) {
       return true;
     }
 
-    const request = context.switchToHttp().getRequest<RequestLike>();
     const user = request.user;
     if (!user) {
       throw new ForbiddenException(ERR_FORBIDDEN_DEFAULT);
@@ -51,11 +62,11 @@ export class RolesGuard implements CanActivate {
           this.prisma.production.findUnique({ where: { id: productionId }, select: { organizationId: true } }),
           this.prisma.user.findUnique({ where: { id: user.id }, select: { organizationId: true } })
         ]);
-        if (!caller?.organizationId || production?.organizationId !== caller.organizationId) {
-          throw new ForbiddenException("소속 조직의 공연만 관리할 수 있습니다");
-        }
+        if (caller?.organizationId && production?.organizationId === caller.organizationId) return true;
+        // 타 조직에서는 전역 운영자 등급 대신 이 공연에 배정된 역할만 검사한다.
+      } else {
+        return true;
       }
-      return true;
     }
 
     if (!productionRoles?.length) {

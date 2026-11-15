@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable } from "@nestjs/common";
 import { Prisma, SceneBlockType } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
+import { VERSION_METADATA_SELECT } from "./script-shared.util";
 
 export type SnapshotBlock = {
   id: string;
@@ -9,6 +10,8 @@ export type SnapshotBlock = {
   characterId: string | null;
   cueLabel: string | null;
   text: string;
+  startMs: number | null;
+  durationMs: number | null;
 };
 
 export type SnapshotScene = {
@@ -76,7 +79,7 @@ export class ScriptSnapshotService {
           }
         }
       },
-      versions: { orderBy: { createdAt: "desc" } },
+      versions: { orderBy: { createdAt: "desc" }, select: VERSION_METADATA_SELECT },
       imports: { orderBy: { createdAt: "desc" } }
     };
   }
@@ -84,7 +87,20 @@ export class ScriptSnapshotService {
   buildScriptSnapshot(scriptId: string, tx: Prisma.TransactionClient | PrismaService) {
     return tx.script.findUniqueOrThrow({
       where: { id: scriptId },
-      include: this.scriptDetailInclude()
+      // 버전에는 복원할 대본 본문만 남겨 비공개 주석과 이전 버전이 중첩되지 않게 한다.
+      select: {
+        id: true, title: true,
+        acts: { orderBy: { order: "asc" }, select: {
+          id: true, order: true, title: true,
+          scenes: { orderBy: { order: "asc" }, select: {
+            id: true, order: true, title: true, summary: true,
+            blocks: { orderBy: { order: "asc" }, select: {
+              id: true, order: true, type: true, characterId: true, cueLabel: true, text: true,
+              startMs: true, durationMs: true
+            } }
+          } }
+        } }
+      }
     });
   }
 
@@ -148,31 +164,33 @@ export class ScriptSnapshotService {
     }
 
     return {
-      id: this.asRequiredString(data.id, "대본 버전의 script id가 올바르지 않아요"),
+      id: this.asRequiredString(data.id, "대본 버전의 대본 식별자가 올바르지 않아요"),
       title: this.asOptionalString(data.title) || "복원된 대본",
       acts: actsRaw.map((actRaw, actIndex) => {
         const act = this.asRecord(actRaw, "대본 버전의 막 정보가 올바르지 않아요");
         const scenesRaw = this.asArray(act.scenes, "대본 버전의 장 정보가 없어요");
         return {
-          id: this.asRequiredString(act.id, "대본 버전의 막 id가 올바르지 않아요"),
+          id: this.asRequiredString(act.id, "대본 버전의 막 식별자가 올바르지 않아요"),
           order: this.asPositiveInt(act.order, actIndex + 1),
           title: this.asOptionalString(act.title) || `${actIndex + 1}막`,
           scenes: scenesRaw.map((sceneRaw, sceneIndex) => {
             const scene = this.asRecord(sceneRaw, "대본 버전의 장 정보가 올바르지 않아요");
             const blocksRaw = this.asArray(scene.blocks, "대본 버전의 블록 정보가 없어요");
             return {
-              id: this.asRequiredString(scene.id, "대본 버전의 장 id가 올바르지 않아요"),
+              id: this.asRequiredString(scene.id, "대본 버전의 장면 식별자가 올바르지 않아요"),
               order: this.asPositiveInt(scene.order, sceneIndex + 1),
               title: this.asOptionalString(scene.title) || `${sceneIndex + 1}장`,
               summary: this.asOptionalString(scene.summary),
               blocks: blocksRaw.map((blockRaw, blockIndex) => {
                 const block = this.asRecord(blockRaw, "대본 버전의 블록 정보가 올바르지 않아요");
                 return {
-                  id: this.asRequiredString(block.id, "대본 버전의 블록 id가 올바르지 않아요"),
+                  id: this.asRequiredString(block.id, "대본 버전의 줄 식별자가 올바르지 않아요"),
                   order: this.asPositiveInt(block.order, blockIndex + 1),
                   type: this.asSceneBlockType(block.type),
                   characterId: this.asOptionalString(block.characterId),
                   cueLabel: this.asOptionalString(block.cueLabel),
+                  startMs: this.asNullableTiming(block.startMs, 0, "대본 버전의 줄 시작 시간이 올바르지 않아요"),
+                  durationMs: this.asNullableTiming(block.durationMs, 1, "대본 버전의 줄 길이가 올바르지 않아요"),
                   text: this.asRequiredString(block.text, "대본 버전의 블록 본문이 올바르지 않아요")
                 };
               })
@@ -217,5 +235,14 @@ export class ScriptSnapshotService {
       return value as SceneBlockType;
     }
     throw new BadRequestException("대본 버전의 블록 타입이 올바르지 않아요");
+  }
+
+  private asNullableTiming(value: unknown, minimum: number, message: string): number | null {
+    // 시간 필드가 없던 과거 버전은 자동 배치(null)로 복원한다.
+    if (value === undefined || value === null) return null;
+    if (typeof value !== "number" || !Number.isInteger(value) || value < minimum || value > 2_147_483_647) {
+      throw new BadRequestException(message);
+    }
+    return value;
   }
 }

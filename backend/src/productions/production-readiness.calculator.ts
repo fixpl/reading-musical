@@ -13,12 +13,12 @@ export type ReadinessCheck = {
 };
 
 export type ProductionReadinessInput = {
-  memberships: { roles: { role: string }[]; staffAssignments: { id: string }[] }[];
-  scripts: { versions: { id: string }[]; acts: { scenes: { blocks: { id: string }[] }[] }[] }[];
-  musicCues: { id: string; anchorStatus: AnchorStatus }[];
+  memberships: { roles: { role: string }[]; staffAssignments: unknown[] }[];
+  scripts: { versions: unknown[]; acts: { scenes: { blocks: unknown[] }[] }[] }[];
+  musicCues: { id?: string; anchorStatus: AnchorStatus }[];
   events: { attendances: { status: string }[] }[];
-  runSheets: { id: string; status: RunSheetStatus }[];
-  checklistPhases: { items: { id: string; status: ChecklistStatus }[] }[];
+  runSheets: { id?: string; status: RunSheetStatus }[];
+  checklistPhases: { items: { id?: string; status: ChecklistStatus }[] }[];
 };
 
 /**

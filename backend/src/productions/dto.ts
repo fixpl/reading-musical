@@ -2,10 +2,12 @@ import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { Phase, ProductionRole, StaffDiscipline, Visibility } from "@prisma/client";
 import { Type } from "class-transformer";
 import {
+  ArrayMaxSize,
   ArrayMinSize,
   IsArray,
   IsBoolean,
   IsDateString,
+  IsEmail,
   IsEnum,
   IsInt,
   IsOptional,
@@ -41,6 +43,7 @@ export class ReplacePositionRequirementsDto {
   @ApiProperty({ type: [PositionRequirementDto] })
   @IsArray()
   @ArrayMinSize(1)
+  @ArrayMaxSize(50)
   @ValidateNested({ each: true })
   @Type(() => PositionRequirementDto)
   positions!: PositionRequirementDto[];
@@ -71,6 +74,7 @@ export class CreateProductionDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
+  @MaxLength(100)
   organizationId?: string;
 
   @ApiProperty()
@@ -82,21 +86,25 @@ export class CreateProductionDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
+  @MaxLength(100)
   slug?: string;
 
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
+  @MaxLength(5000)
   synopsis?: string;
 
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
+  @MaxLength(5000)
   description?: string;
 
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
+  @MaxLength(200)
   venue?: string;
 
   @ApiPropertyOptional()
@@ -117,6 +125,7 @@ export class CreateProductionDto {
   @ApiPropertyOptional({ type: [PositionRequirementDto] })
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(50)
   @ValidateNested({ each: true })
   @Type(() => PositionRequirementDto)
   positionRequirements?: PositionRequirementDto[];
@@ -126,6 +135,7 @@ export class CheckProductionTitleQueryDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
+  @MaxLength(100)
   organizationId?: string;
 
   @ApiProperty()
@@ -151,21 +161,25 @@ export class UpdateProductionDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
+  @MaxLength(100)
   slug?: string | null;
 
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
+  @MaxLength(5000)
   synopsis?: string | null;
 
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
+  @MaxLength(5000)
   description?: string | null;
 
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
+  @MaxLength(200)
   venue?: string | null;
 
   @ApiPropertyOptional()
@@ -191,6 +205,7 @@ export class UpdateProductionDto {
   @ApiPropertyOptional({ type: [PositionRequirementDto] })
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(50)
   @ValidateNested({ each: true })
   @Type(() => PositionRequirementDto)
   positionRequirements?: PositionRequirementDto[];
@@ -206,6 +221,7 @@ export class DuplicateProductionDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
+  @MaxLength(100)
   slug?: string;
 }
 
@@ -213,12 +229,14 @@ export class AddMembersDto {
   @ApiProperty({ type: [String] })
   @IsArray()
   @ArrayMinSize(1)
-  @IsString({ each: true })
+  @ArrayMaxSize(200)
+  @IsUUID("all", { each: true })
   userIds!: string[];
 
   @ApiProperty({ enum: ProductionRole, isArray: true })
   @IsArray()
   @ArrayMinSize(1)
+  @ArrayMaxSize(20)
   @IsEnum(ProductionRole, { each: true })
   roles!: ProductionRole[];
 
@@ -237,6 +255,7 @@ export class UpdateMemberDto {
   @IsOptional()
   @IsArray()
   @ArrayMinSize(1)
+  @ArrayMaxSize(20)
   @IsEnum(ProductionRole, { each: true })
   roles?: ProductionRole[];
 
@@ -254,6 +273,7 @@ export class StaffAssignmentDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
+  @MaxLength(80)
   customLabel?: string | null;
 
   @ApiPropertyOptional()
@@ -265,6 +285,7 @@ export class StaffAssignmentDto {
 export class PutStaffAssignmentsDto {
   @ApiProperty({ type: [StaffAssignmentDto] })
   @IsArray()
+  @ArrayMaxSize(100)
   @ValidateNested({ each: true })
   @Type(() => StaffAssignmentDto)
   assignments!: StaffAssignmentDto[];
@@ -272,7 +293,7 @@ export class PutStaffAssignmentsDto {
 
 export class CreateInvitationDto {
   @ApiProperty()
-  @IsString()
+  @IsEmail({}, { message: "올바른 이메일 주소를 입력해 주세요" })
   email!: string;
 
   @ApiProperty({ enum: ProductionRole })
@@ -291,6 +312,7 @@ export class SearchProductionQueryDto {
   @ApiPropertyOptional({ description: "검색어. 2자 미만이면 빈 결과를 반환한다." })
   @IsOptional()
   @IsString()
+  @MaxLength(100)
   q?: string;
 
   @ApiPropertyOptional({ default: 20, minimum: 1, maximum: 50 })

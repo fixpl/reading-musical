@@ -46,7 +46,7 @@ export class ProductionAccessService {
       })
     ]);
 
-    if (user.platformRole === PlatformRole.ORG_ADMIN && dbUser?.organizationId === production.organizationId) {
+    if (user.platformRole === PlatformRole.ORG_ADMIN && dbUser?.organizationId && dbUser.organizationId === production.organizationId) {
       return { production, viewerMembership: membership, canViewSensitive: true };
     }
 

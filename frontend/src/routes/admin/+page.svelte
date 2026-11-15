@@ -1,61 +1,178 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { page } from "$app/stores";
+  import { ArrowRight, ChevronDown, Plus, RefreshCw } from "@lucide/svelte";
   import { Button } from "$lib/components/ui/button";
   import { Badge } from "$lib/components/ui/badge";
+  import { PageHeader } from "$lib/components/ui/page-header";
+  import { EmptyState } from "$lib/components/ui/empty-state";
+  import OperationsChart from "$lib/components/admin/operations-chart.svelte";
   import { apiRequest } from "$lib/api/client";
-  import { INQUIRY_STATUS_LABELS, PHASE_LABELS, formatRelative } from "$lib/domain/labels";
-  type Stats = { users: number; blockedUsers: number; profileIncompleteUsers: number; productions: number; publishedProductions: number; thisMonthEvents: number };
+  import { peek, remember } from "$lib/api/swr";
+  import { captureSession, isCurrentSession } from "$lib/api/session";
+  import { setNewInquiryCount } from "$lib/stores/admin-badges";
+  import { countProductionPhases, nextRehearsalTask, rehearsalPreparationSteps, readinessStepLink, readinessStepState, type ProductionReadiness, type OperationStep } from "$lib/domain/operations-dashboard";
+  import { INQUIRY_STATUS_LABELS, PHASE_LABELS, formatDateTime, formatRelative } from "$lib/domain/labels";
+
+  type Stats = { productions: number; thisMonthEvents: number };
   type Inquiry = { id: string; orgName: string; contactName: string; status: string; message: string; createdAt: string };
-  type Production = { id: string; title: string; currentPhase: string; venue?: string | null; archived?: boolean };
-  let stats = $state<Stats | null>(null);
-  let inquiries = $state<Inquiry[]>([]);
-  let productions = $state<Production[]>([]);
-  let newCount = $state(0);
-  let loading = $state(true);
+  type Dashboard = { stats: Stats; inquiries: Inquiry[]; newCount: number; readiness: ProductionReadiness[]; waiting: number };
+
+  // 메뉴를 오가도 빈 화면이 번쩍이지 않게, 받아 둔 값을 먼저 보여 주고 뒤에서 새로 받는다.
+  let data = $state<Dashboard | null>(peek<Dashboard>("admin:dashboard") ?? null);
   let error = $state("");
-  onMount(load);
+  let refreshing = $state(false);
+  let disposed = false;
+  onMount(() => {
+    void load();
+    return () => { disposed = true; };
+  });
+
   async function load() {
-    loading = true; error = "";
+    if (refreshing) return;
+    const session = captureSession();
+    const active = () => !disposed && isCurrentSession(session);
+    refreshing = true;
+    error = "";
     try {
-      const [summary, inbox, shows] = await Promise.all([
+      const [stats, inbox, ready, members] = await Promise.all([
         apiRequest<Stats>("/admin/stats"),
         apiRequest<{ items: Inquiry[]; counts: Partial<Record<string, number>> }>("/admin/inquiries?take=5"),
-        apiRequest<Production[]>("/productions")
+        apiRequest<{ items: ProductionReadiness[] }>("/admin/overview"),
+        apiRequest<{ counts: { unassigned: number } }>("/admin/members/search?take=1&assigned=no&status=ACTIVE")
       ]);
-      stats = summary; inquiries = inbox.items; newCount = inbox.counts.NEW ?? 0; productions = shows.filter((show) => !show.archived);
-    } catch (cause) { error = cause instanceof Error ? cause.message : "운영 정보를 불러오지 못했습니다"; }
-    finally { loading = false; }
+      if (active()) {
+        const newCount = inbox.counts.NEW ?? 0;
+        data = remember("admin:dashboard", { stats, inquiries: inbox.items, newCount, readiness: ready.items, waiting: members.counts.unassigned }, session);
+        setNewInquiryCount(newCount);
+      }
+    } catch (cause) {
+      if (active()) error = cause instanceof Error ? cause.message : "운영 정보를 불러오지 못했어요";
+    } finally {
+      if (active()) refreshing = false;
+    }
   }
+
+  const today = new Intl.DateTimeFormat("ko-KR", { month: "long", day: "numeric", weekday: "long", timeZone: "Asia/Seoul" }).format(new Date());
+  const phaseCounts = $derived(countProductionPhases(data?.readiness ?? []));
+  const displayReadiness = $derived((data?.readiness ?? []).filter((show) => !show.archived).sort((a, b) => {
+    const nextA = a.nextEventAt ? Date.parse(a.nextEventAt) : Infinity;
+    const nextB = b.nextEventAt ? Date.parse(b.nextEventAt) : Infinity;
+    return nextA === nextB
+      ? Date.parse(b.lastActivityAt ?? "1970-01-01") - Date.parse(a.lastActivityAt ?? "1970-01-01")
+      : nextA - nextB;
+  }).slice(0, 5));
+  const stepLabel = (step: OperationStep) => ({ members: "공연팀", script: "대본·장면", video: "영상·배경", cues: "큐시트", schedule: "다음 일정" } as Record<string, string>)[step.key] ?? step.label;
+  const stepDetail = (step: OperationStep) => step.key === "schedule" && step.done ? formatDateTime(step.detail) : step.detail;
 </script>
 
-<svelte:head><title>공연 운영 — 아트브릿지</title></svelte:head>
-<div class="mx-auto w-full min-w-0 max-w-6xl space-y-5">
-  <header class="flex flex-wrap items-end justify-between gap-4 rounded-2xl border bg-card p-5 sm:p-7">
-    <div><p class="text-primary text-xs font-bold">운영 관리자</p><h1 class="mt-2 text-2xl font-bold sm:text-3xl">공연 준비를 한곳에서</h1><p class="text-muted-foreground mt-2 text-sm">회원 배정부터 일정, 대본, 리허설까지 공연별로 이어서 관리합니다.</p></div>
-    <div class="flex flex-wrap gap-2"><Button href="/admin/productions" class="min-h-11">공연 관리</Button><Button href="/admin/members" variant="outline" class="min-h-11">회원 · 캐스팅 대상</Button></div>
-  </header>
-  <nav aria-label="운영 메뉴" class="grid grid-cols-2 gap-2 sm:grid-cols-4">
-    {#each [{ href: '/admin/productions', title: '공연 만들기 · 관리', detail: '공연별 제작 워크스페이스' }, { href: '/admin/members', title: '회원 관리', detail: '배우 · 스태프 검색과 배정' }, { href: '/admin/inquiries', title: '신청 문의', detail: '문의 확인과 공연 전환' }, { href: '/app', title: '참여자 화면', detail: '내 작업과 연습 화면 확인' }] as item (item.href)}
-      <a href={item.href} class="bg-card hover:bg-accent flex min-h-24 min-w-0 flex-col justify-center rounded-xl border p-4 transition-colors"><span class="break-words text-sm font-bold">{item.title}</span><span class="text-muted-foreground mt-1 text-xs">{item.detail}</span></a>
-    {/each}
-  </nav>
-  {#if loading}<p class="bg-card rounded-2xl border p-8" role="status">공연 운영 현황을 불러오고 있습니다…</p>
-  {:else if error}<section role="alert" class="bg-card rounded-2xl border p-5"><p>{error}</p><Button variant="outline" class="mt-3 min-h-11" onclick={load}>다시 불러오기</Button></section>
-  {:else if stats}
-    <div class="grid grid-cols-2 gap-3 lg:grid-cols-4">
-      {#each [{ title: '전체 회원', value: stats.users, detail: `프로필 미완성 ${stats.profileIncompleteUsers}명`, href: '/admin/members' }, { title: '관리 공연', value: stats.productions, detail: `공개 ${stats.publishedProductions}편`, href: '/admin/productions' }, { title: '이번 달 일정', value: stats.thisMonthEvents, detail: '공연별 일정에서 확인', href: '/admin/productions' }, { title: '새 신청 문의', value: newCount, detail: '접수 상태 확인 필요', href: '/admin/inquiries' }] as item (item.title)}
-        <a href={item.href} class="bg-card rounded-2xl border p-4"><p class="text-muted-foreground text-xs">{item.title}</p><p class="mt-2 text-3xl font-bold tabular-nums">{item.value}</p><p class="text-muted-foreground mt-2 text-xs">{item.detail}</p></a>
+<svelte:head><title>운영 현황 — 아트브릿지</title></svelte:head>
+
+<div class="mx-auto w-full min-w-0 max-w-7xl space-y-7 pb-6 sm:space-y-8">
+  <PageHeader title="운영 현황" description={today}>
+    {#snippet actions()}
+      <Button variant="outline" class="min-h-11" onclick={load} disabled={refreshing} aria-label="운영 현황 새로고침"><RefreshCw class={["size-4", refreshing && "motion-safe:animate-spin"]} aria-hidden="true" /><span class="hidden sm:inline">새로고침</span></Button>
+      <Button href="/admin/assistant" variant="outline" class="min-h-11">공연 도우미</Button>
+      <Button href="/admin/productions?create=1" class="min-h-11"><Plus class="size-4" aria-hidden="true" />공연 등록</Button>
+    {/snippet}
+  </PageHeader>
+
+  {#if error}
+    <section role="alert" class="bg-card rounded-xl border p-5"><p class="text-sm">{error} {data ? "아래는 이전에 불러온 내용이에요." : ""}</p><Button variant="outline" class="mt-3 min-h-11" onclick={load}>다시 불러오기</Button></section>
+  {/if}
+  {#if !data && !error}
+    <div role="status" aria-label="운영 현황을 불러오는 중" class="space-y-5"><div class="bg-muted/40 h-36 rounded-xl motion-safe:animate-pulse lg:h-20"></div><div class="bg-muted/40 h-72 rounded-xl motion-safe:animate-pulse"></div></div>
+  {:else if data}
+    <dl class="bg-card grid grid-cols-2 overflow-hidden rounded-xl border lg:grid-cols-4">
+      {#each [
+        { label: "배정 대기 회원", value: data.waiting, unit: "명", href: "/admin/members?view=unassigned", hot: data.waiting > 0 },
+        { label: "새 공연 신청", value: data.newCount, unit: "건", href: data.newCount > 0 ? "/admin/inquiries?status=NEW" : "/admin/inquiries", hot: data.newCount > 0 },
+        { label: "등록 공연", value: data.stats.productions, unit: "편", href: "/admin/productions", hot: false },
+        { label: "이번 달 일정", value: data.stats.thisMonthEvents, unit: "건", hot: false }
+      ] as item (item.label)}
+        <div class={["relative min-w-0 border-e border-b p-3 nth-2:border-e-0 nth-3:border-b-0 last:border-0 sm:p-4 lg:border-b-0 lg:nth-2:border-e", item.href && "hover:bg-muted/30 transition-colors"]}>
+          <dt class="text-muted-foreground text-xs sm:text-sm">
+            {#if item.href}<a href={item.href} aria-label={`${item.label} ${item.value}${item.unit}`} class="focus-visible:after:ring-ring after:absolute after:inset-1 after:rounded-md focus-visible:after:ring-2">{item.label}</a>{:else}{item.label}{/if}
+          </dt>
+          <dd class="mt-1 flex items-baseline gap-1"><span class={["text-2xl font-semibold tabular-nums tracking-tight", item.hot && "text-primary"]}>{item.value.toLocaleString()}</span><span class="text-muted-foreground text-xs">{item.unit}</span></dd>
+        </div>
       {/each}
-    </div>
-    <section class="bg-card rounded-2xl border p-4 sm:p-5">
-      <div class="flex items-center justify-between gap-2"><h2 class="font-bold">진행 중인 공연</h2><Button href="/admin/productions" variant="ghost">전체 보기</Button></div>
-      <p class="text-muted-foreground mt-1 text-sm">공연을 선택하고 참여자 배정 → 일정 공유 → 대본 · 큐 준비 → 리허설 순서로 진행합니다.</p>
-      <div class="mt-4 grid gap-3 md:grid-cols-2">
-        {#each productions.slice(0, 6) as show (show.id)}
-          <article class="min-w-0 rounded-xl border p-4"><div class="flex flex-wrap items-center gap-2"><a href={`/app/p/${show.id}`} class="min-w-0 break-words font-semibold hover:underline">{show.title}</a><Badge variant="secondary">{PHASE_LABELS[show.currentPhase] ?? show.currentPhase}</Badge></div>{#if show.venue}<p class="text-muted-foreground mt-1 text-xs">{show.venue}</p>{/if}<div class="mt-4 grid grid-cols-2 gap-2"><Button href={`/app/p/${show.id}/manage/members`} variant="outline" class="min-h-11">참여자 배정</Button><Button href={`/app/p/${show.id}/schedule`} variant="outline" class="min-h-11">공유 일정</Button><Button href={`/app/p/${show.id}/cuesheet`} variant="outline" class="min-h-11">대본 · 큐 제작</Button><Button href={`/app/p/${show.id}/live`} class="min-h-11">시간표 · 연습</Button></div></article>
-        {:else}<p class="text-muted-foreground col-span-full py-6 text-center text-sm">아직 진행 중인 공연이 없습니다. 공연 관리에서 첫 공연을 등록해 주세요.</p>{/each}
+    </dl>
+    {#if $page.data.site?.ready.inquiry === false}
+      <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 rounded-xl border px-4 py-2">
+        <p class="text-sm">기관·단체의 새 공연 신청은 접수 준비 중이에요.</p>
+        <Button href="/admin/inquiries" variant="ghost" class="min-h-11 px-2">접수 준비 확인 <ArrowRight class="size-4" aria-hidden="true" /></Button>
+      </div>
+    {/if}
+
+    <section id="production-registration" aria-labelledby="prod-title" class="min-w-0 scroll-mt-24">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <h2 id="prod-title" class="text-lg font-semibold">공연별 다음 할 일</h2>
+        <Button variant="outline" href="/admin/productions" class="min-h-11">전체 공연 보기</Button>
+      </div>
+      {#if !displayReadiness.length}
+        <EmptyState class="mt-4" title={data.readiness.length ? "준비 중인 공연이 없어요" : "아직 등록된 공연이 없어요"} description="공연 이름을 입력하고 대본부터 준비해 보세요.">
+          {#snippet action()}<Button href="/admin/productions?create=1" class="min-h-11">공연 등록</Button>{/snippet}
+        </EmptyState>
+      {:else}
+        <div class="bg-card mt-4 overflow-hidden rounded-xl border">
+          <ul class="divide-y">
+            {#each displayReadiness as show (show.id)}
+              {@const task = nextRehearsalTask(show)}
+              <li class="min-w-0 px-4 sm:px-5">
+                <div class="flex flex-wrap items-center justify-between gap-x-5 gap-y-2 pt-3">
+                  <div class="min-w-0 flex-1 basis-full sm:basis-0">
+                    <a href={`/app/p/${show.id}`} class="inline-flex min-h-9 items-center font-semibold underline-offset-4 hover:underline [overflow-wrap:anywhere]">{show.title}</a>
+                    <div class="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+                      <Badge variant="outline">{PHASE_LABELS[show.currentPhase] ?? show.currentPhase}</Badge>
+                      {#if show.nextEventAt}<span class="text-muted-foreground text-xs">다음 일정 {formatDateTime(show.nextEventAt)}</span>
+                      {:else if show.venue}<span class="text-muted-foreground break-words text-xs">{show.venue}</span>{/if}
+                    </div>
+                  </div>
+                  <Button href={task ? `${readinessStepLink(show.id, task.key)}${task.query ?? ""}` : `/app/p/${show.id}`} variant={task ? "secondary" : "outline"} class="min-h-11" aria-label={`${show.title} · ${task?.label ?? "공연 홈 열기"}`}>
+                    {task?.label ?? "공연 홈 열기"}<ArrowRight class="size-4" aria-hidden="true" />
+                  </Button>
+                </div>
+                <details class="group">
+                  <summary class="text-muted-foreground hover:text-foreground inline-flex min-h-11 cursor-pointer list-none items-center gap-1.5 text-xs font-medium">
+                    준비 내역<ChevronDown class="size-3.5 group-open:rotate-180" aria-hidden="true" />
+                  </summary>
+                  <div class="mb-4 grid grid-cols-2 gap-2 rounded-lg bg-muted/30 p-2 sm:grid-cols-3 xl:grid-cols-5">
+                    {#each [...rehearsalPreparationSteps(show), ...(show.casting ? [{ key: "casting", label: "배역 배정", ...show.casting }] : [])] as step (step.key)}
+                      {@const state = step.key === "video" && !step.done ? "선택" : step.key === "casting" && step.detail === "배역 없음" ? "배역 없음" : readinessStepState(step)}
+                      <a href={readinessStepLink(show.id, step.key)} class="hover:bg-background flex min-h-11 min-w-0 flex-col gap-1 rounded-md px-2.5 py-2 text-xs">
+                        <span class="font-medium">{stepLabel(step)} <span class="text-muted-foreground font-normal">· {state}</span></span>
+                        {#if step.detail !== "—" && step.detail !== state}<span class="text-muted-foreground break-words leading-4">{stepDetail(step)}</span>{/if}
+                      </a>
+                    {/each}
+                  </div>
+                </details>
+              </li>
+            {/each}
+          </ul>
+        </div>
+      {/if}
+    </section>
+
+    <div class="grid min-w-0 gap-6 xl:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
+    <section aria-labelledby="inq-title" class="min-w-0">
+      <div class="flex flex-wrap items-center justify-between gap-2"><h2 id="inq-title" class="text-base font-semibold">최근 공연 문의</h2><Button variant="ghost" href="/admin/inquiries" class="min-h-11">문의 전체 보기</Button></div>
+      <ul class="bg-card mt-3 divide-y overflow-hidden rounded-xl border">
+        {#each data.inquiries as inquiry (inquiry.id)}
+          <li><a href={`/admin/inquiries/${inquiry.id}`} class="hover:bg-muted/40 flex min-w-0 flex-wrap items-center gap-3 px-4 py-4 transition-colors">
+            <Badge variant={inquiry.status === "NEW" ? "default" : "secondary"}>{INQUIRY_STATUS_LABELS[inquiry.status] ?? inquiry.status}</Badge>
+            <div class="min-w-0 flex-1"><p class="break-words text-sm font-medium">{inquiry.orgName} · {inquiry.contactName}</p><p class="text-muted-foreground mt-1 line-clamp-1 break-words text-xs">{inquiry.message}</p></div>
+            <span class="text-muted-foreground text-xs">{formatRelative(inquiry.createdAt)}</span><ArrowRight class="text-muted-foreground size-4" aria-hidden="true" />
+          </a></li>
+        {:else}<li class="text-muted-foreground px-4 py-8 text-center text-sm">아직 접수된 문의가 없어요.</li>{/each}
+      </ul>
+    </section>
+    <section aria-labelledby="phase-title" class="min-w-0">
+      <div class="flex min-h-11 items-center justify-between gap-3"><h2 id="phase-title" class="text-base font-semibold">공연 진행 단계</h2><span class="text-muted-foreground text-xs">전체 {data.readiness.length}편</span></div>
+      <div class="bg-card mt-3 rounded-xl border px-4 py-5">
+        {#if data.readiness.length}<OperationsChart items={phaseCounts} />{:else}<p class="text-muted-foreground text-sm">아직 집계할 공연이 없어요.</p>{/if}
       </div>
     </section>
-    <section class="bg-card rounded-2xl border p-4 sm:p-5"><div class="flex items-center justify-between gap-2"><h2 class="font-bold">최근 신청 문의</h2><Button href="/admin/inquiries" variant="ghost">문의 관리</Button></div><div class="mt-2 divide-y">{#each inquiries as inquiry (inquiry.id)}<a href="/admin/inquiries" class="flex min-w-0 flex-wrap items-center gap-3 py-4"><Badge variant={inquiry.status === 'NEW' ? 'default' : 'secondary'}>{INQUIRY_STATUS_LABELS[inquiry.status] ?? inquiry.status}</Badge><div class="min-w-0 flex-1"><p class="break-words text-sm font-semibold">{inquiry.orgName} · {inquiry.contactName}</p><p class="text-muted-foreground mt-1 line-clamp-2 break-words text-xs">{inquiry.message}</p></div><span class="text-muted-foreground text-xs">{formatRelative(inquiry.createdAt)}</span></a>{:else}<p class="text-muted-foreground py-6 text-sm">접수된 문의가 없습니다.</p>{/each}</div></section>
+    </div>
   {/if}
 </div>

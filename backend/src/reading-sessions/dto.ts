@@ -1,6 +1,37 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { Type } from "class-transformer";
-import { IsBoolean, IsDateString, IsInt, IsObject, IsOptional, IsString, IsUUID, MaxLength, Min } from "class-validator";
+import {
+  IsBoolean,
+  IsDateString,
+  IsInt,
+  IsObject,
+  IsOptional,
+  IsString,
+  IsUUID,
+  MaxLength,
+  Min,
+  Validate,
+  ValidatorConstraint,
+  ValidatorConstraintInterface
+} from "class-validator";
+
+const MAX_CUE_PAYLOAD_BYTES = 2048;
+
+@ValidatorConstraint({ name: "cuePayloadSize", async: false })
+export class CuePayloadSizeConstraint implements ValidatorConstraintInterface {
+  validate(value: unknown) {
+    if (value === undefined || value === null) return true;
+    try {
+      return Buffer.byteLength(JSON.stringify(value), "utf8") <= MAX_CUE_PAYLOAD_BYTES;
+    } catch {
+      return false;
+    }
+  }
+
+  defaultMessage() {
+    return "큐 부가 정보는 2KB 이하여야 해요";
+  }
+}
 
 export class StartReadingSessionDto {
   @ApiProperty()
@@ -75,6 +106,7 @@ export class FireReadingCueDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsObject()
+  @Validate(CuePayloadSizeConstraint)
   payload?: Record<string, unknown>;
 }
 

@@ -59,9 +59,12 @@ jobs:
       - name: Apply migrations to CI database
         run: npm run backend:prisma:deploy
 
-      # docs/와 tests/는 저장소에 포함하지 않으므로 CI에서는 컴파일 가능한지만 검증한다.
-      - name: Validate and build backend
-        run: npm run backend:prisma:validate && npm run backend:prisma:generate && npm run backend:build
+      # 로컬과 동일한 진입점으로 타입·권한·계정 격리·미디어 회귀와 배포 빌드를 검사한다.
+      - name: Check backend and frontend
+        run: npm run check
 
-      - name: Check and build frontend
-        run: npm --prefix frontend run check && npm run frontend:build
+      - name: Run unit and regression tests
+        run: npm run test
+
+      - name: Build backend and frontend
+        run: npm run build

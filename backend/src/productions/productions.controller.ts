@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Header, Param, Patch, Post, Put, Query, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { PlatformRoles } from "../common/decorators/platform-roles.decorator";
 import { ProductionRoles } from "../common/decorators/production-roles.decorator";
@@ -27,6 +27,8 @@ import { ProductionDirectoryService } from "./production-directory.service";
 import { ProductionMembersService } from "./production-members.service";
 import { ProductionReadinessService } from "./production-readiness.service";
 import { StaffAssignmentsService } from "./staff-assignments.service";
+import { AllowDeletedProduction } from "../common/decorators/allow-deleted-production.decorator";
+import { ActiveInvitationProductionGuard, NoRunningReadingGuard } from "./production-availability.guard";
 
 @ApiTags("productions")
 @ApiBearerAuth()
@@ -66,6 +68,12 @@ export class ProductionsController {
   @Get(":id")
   findOne(@Param("id") id: string, @CurrentUser() user: RequestUser) {
     return this.productionsService.findOne(id, user);
+  }
+
+  @Get(":id/access")
+  @Header("Cache-Control", "private, no-store")
+  getCapabilities(@Param("id") id: string, @CurrentUser() user: RequestUser) {
+    return this.productionsService.getCapabilities(id, user);
   }
 
   @Get(":id/readiness")
@@ -145,6 +153,7 @@ export class ProductionsController {
   }
 
   @Delete(":id")
+  @UseGuards(NoRunningReadingGuard)
   @PlatformRoles("SUPER_ADMIN", "ORG_ADMIN")
   @ProductionRoles("PRODUCER")
   softDelete(@Param("id") id: string, @CurrentUser() user: RequestUser) {
@@ -152,6 +161,7 @@ export class ProductionsController {
   }
 
   @Post(":id/restore")
+  @AllowDeletedProduction()
   @PlatformRoles("SUPER_ADMIN", "ORG_ADMIN")
   @ProductionRoles("PRODUCER")
   restore(@Param("id") id: string, @CurrentUser() user: RequestUser) {
@@ -198,11 +208,25 @@ export class ProductionsController {
     return this.members.removeMember(id, membershipId, user);
   }
 
+  @Get(":id/invitations")
+  @PlatformRoles("SUPER_ADMIN", "ORG_ADMIN")
+  @ProductionRoles("PRODUCER")
+  listInvitations(@Param("id") id: string) {
+    return this.members.listInvitations(id);
+  }
+
+  @Delete(":id/invitations/:invitationId")
+  @PlatformRoles("SUPER_ADMIN", "ORG_ADMIN")
+  @ProductionRoles("PRODUCER")
+  revokeInvitation(@Param("id") id: string, @Param("invitationId") invitationId: string, @CurrentUser() user: RequestUser) {
+    return this.members.revokeInvitation(id, invitationId, user);
+  }
+
   @Post(":id/invitations")
   @PlatformRoles("SUPER_ADMIN", "ORG_ADMIN")
   @ProductionRoles("PRODUCER")
-  createInvitation(@Param("id") id: string, @Body() dto: CreateInvitationDto) {
-    return this.members.createInvitation(id, dto);
+  createInvitation(@Param("id") id: string, @Body() dto: CreateInvitationDto, @CurrentUser() user: RequestUser) {
+    return this.members.createInvitation(id, dto, user);
   }
 
   @Get(":id/members/:membershipId/staff-assignments")
@@ -239,6 +263,7 @@ export class ProductionsController {
 
 @ApiTags("invitations")
 @Controller("invitations")
+@UseGuards(ActiveInvitationProductionGuard)
 export class InvitationsController {
   constructor(private readonly members: ProductionMembersService) {}
 

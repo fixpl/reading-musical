@@ -16,6 +16,7 @@ import type { RequestUser } from "../common/types/request-user";
 import { PrismaService } from "../prisma/prisma.service";
 import { AssetPurpose, AssetPolicy, CreateAssetDto } from "./dto";
 import { assertProductionMembership } from "../common/access/assert-production-membership";
+import { R2Storage, readR2Settings } from "./r2-storage";
 
 const MUSIC_EDIT_ROLES = [ProductionRole.PRODUCER, ProductionRole.MUSIC_DIRECTOR];
 const SCRIPT_EDIT_ROLES = [ProductionRole.PRODUCER, ProductionRole.DIRECTOR];
@@ -39,6 +40,13 @@ const VIEW_ROLES = [
 ];
 
 const ASSET_POLICIES: Record<AssetPurpose, AssetPolicy> = {
+  [AssetPurpose.SHOWCASE_IMAGE]: {
+    kind: AssetKind.IMAGE,
+    maxBytes: 10 * 1024 * 1024,
+    allowedMimeTypes: ["image/png", "image/jpeg", "image/webp"],
+    allowedExtensionsByMime: { "image/png": ["png"], "image/jpeg": ["jpg", "jpeg"], "image/webp": ["webp"] },
+    storagePrefix: "showcase"
+  },
   [AssetPurpose.PERFORMANCE_MATERIAL]: {
     // 원본 악보는 추출/OCR 없이도 보관할 수 있다. 실행 가능한 SVG/HTML은 제외한다.
     kind: AssetKind.DOCUMENT,
@@ -136,11 +144,10 @@ const ASSET_POLICIES: Record<AssetPurpose, AssetPolicy> = {
   [AssetPurpose.BACKGROUND_VIDEO]: {
     kind: AssetKind.VIDEO,
     maxBytes: 500 * 1024 * 1024,
-    allowedMimeTypes: ["video/mp4", "video/webm", "video/quicktime"],
+    // 새로 올리는 영상은 MP4(H.264)만 받는다. 이미 올라온 webm·mov는 그대로 재생된다.
+    allowedMimeTypes: ["video/mp4"],
     allowedExtensionsByMime: {
-      "video/mp4": ["mp4", "m4v"],
-      "video/webm": ["webm"],
-      "video/quicktime": ["mov"]
+      "video/mp4": ["mp4", "m4v"]
     },
     storagePrefix: "background"
   },
@@ -150,8 +157,6 @@ const ASSET_POLICIES: Record<AssetPurpose, AssetPolicy> = {
     maxBytes: 500 * 1024 * 1024,
     allowedMimeTypes: [
       "video/mp4",
-      "video/webm",
-      "video/quicktime",
       "audio/mpeg",
       "audio/mp3",
       "audio/wav",
@@ -165,8 +170,6 @@ const ASSET_POLICIES: Record<AssetPurpose, AssetPolicy> = {
     ],
     allowedExtensionsByMime: {
       "video/mp4": ["mp4", "m4v"],
-      "video/webm": ["webm"],
-      "video/quicktime": ["mov"],
       "audio/mpeg": ["mp3"],
       "audio/mp3": ["mp3"],
       "audio/wav": ["wav"],
@@ -190,10 +193,28 @@ type MockObjectSignatureQuery = {
 
 @Injectable()
 export class AssetsService {
+  /** ASSET_STORAGE=r2 이면 Cloudflare R2, 아니면 null(서버 디스크 — 로컬 개발용). */
+  private readonly r2: R2Storage | null;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService
-  ) {}
+  ) {
+    const keys = ["ASSET_STORAGE", "R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET", "R2_BUCKET_NAME", "R2_PROJECT_NAME", "R2_LEGACY_PROJECT_NAMES", "R2_KEY_PREFIX", "R2_ENDPOINT", "R2_ENDPOINT_URL", "R2_REGION"];
+    const settings = readR2Settings(Object.fromEntries(keys.map((key) => [key, this.config.get<string>(key)])));
+    this.r2 = settings ? new R2Storage(settings) : null;
+  }
+
+  /** 이 파일 본문이 R2에 있는가(예전 로컬 키로 남은 파일은 계속 서버 디스크에서 읽는다). */
+  private inR2(storageKey: string) {
+    return Boolean(this.r2?.owns(storageKey));
+  }
+
+  /** 홍보에 직접 올린 이미지만 공개 대상으로 선택할 수 있다. */
+  isShowcaseImageStorageKey(storageKey: string) {
+    const folder = ASSET_POLICIES[AssetPurpose.SHOWCASE_IMAGE].storagePrefix;
+    return this.r2 && this.inR2(storageKey) ? this.r2.isInFolder(storageKey, folder) : storageKey.startsWith(`${folder}/`);
+  }
 
   async createAsset(dto: CreateAssetDto, user: RequestUser) {
     const policy = ASSET_POLICIES[dto.purpose];
@@ -213,8 +234,13 @@ export class AssetsService {
     }
 
     const kind = this.resolveAssetKind(dto.purpose, dto.mimeType, policy);
-    const storageKey = this.buildStorageKey(policy.storagePrefix, dto.productionId ?? user.id, dto.fileName);
+    const storageKey = this.r2
+      ? this.r2.buildKey(policy.storagePrefix, `${randomUUID()}-${this.safeFileName(dto.fileName)}`)
+      : this.buildStorageKey(policy.storagePrefix, dto.productionId ?? user.id, dto.fileName);
     const checksum = this.normalizeChecksum(dto.checksum);
+    if (dto.purpose === AssetPurpose.SHOWCASE_IMAGE && !checksum) {
+      throw new BadRequestException("공연 홍보 사진은 파일 확인값이 필요해요. 사진을 다시 선택해 주세요");
+    }
     const asset = await this.prisma.asset.create({
       data: {
         ownerId: user.id,
@@ -230,8 +256,8 @@ export class AssetsService {
 
     return {
       asset,
-      upload: this.buildSignedUrl("upload", asset.id, storageKey),
-      download: this.buildSignedUrl("download", asset.id, storageKey),
+      upload: await this.signedUrl("upload", asset),
+      download: await this.signedUrl("download", asset),
       policy: {
         kind,
         maxBytes: policy.maxBytes,
@@ -260,7 +286,7 @@ export class AssetsService {
       await this.assertMembership(asset.productionId, user, VIEW_ROLES);
     } else if (asset.ownerId !== user.id && user.platformRole !== "SUPER_ADMIN") {
       const canViewSharedProfilePhoto =
-        this.isPersonalProfileImageAsset(asset) && (await this.sharesProductionWithOwner(asset.ownerId, user.id));
+        this.isPersonalProfileImageAsset(asset) && (await this.sharesCurrentProfilePhoto(asset.ownerId, user.id, asset.id));
       if (!canViewSharedProfilePhoto) {
         throw new ForbiddenException("이 파일을 볼 권한이 없어요");
       }
@@ -271,7 +297,9 @@ export class AssetsService {
       kind: asset.kind,
       mime: asset.mime,
       sizeBytes: asset.sizeBytes,
-      ...this.buildSignedUrl("download", asset.id, asset.storageKey)
+      ...(await this.signedUrl("download", asset)),
+      // R2는 주소에 열기/내려받기 방식이 서명에 들어가므로 내려받기용 주소를 따로 준다.
+      ...(this.inR2(asset.storageKey) ? { downloadUrl: (await this.signedUrl("download", asset, true)).url } : {})
     };
   }
 
@@ -279,6 +307,10 @@ export class AssetsService {
     const asset = await this.prisma.asset.findUnique({ where: { id: assetId } });
     if (!asset) {
       throw new NotFoundException("파일을 찾을 수 없어요");
+    }
+    // R2에 있는 파일은 이 서버를 거치지 않고 R2 서명 주소로만 받는다.
+    if (this.inR2(asset.storageKey)) {
+      throw new NotFoundException("이 파일은 저장소 주소로 받아야 해요");
     }
     if (query.action !== action || !query.expires || !query.signature) {
       throw new ForbiddenException("유효한 signed URL이 필요해요");
@@ -305,6 +337,11 @@ export class AssetsService {
     }
     this.assertChecksumMatches(asset.checksum, body);
 
+    if (this.r2 && this.inR2(asset.storageKey)) {
+      await this.r2.put(asset.storageKey, body, asset.mime);
+      return { assetId, stored: true, sizeBytes: body.length };
+    }
+
     const filePath = this.objectPath(assetId);
     await mkdir(path.dirname(filePath), { recursive: true });
     await writeFile(filePath, body);
@@ -316,7 +353,13 @@ export class AssetsService {
   }
 
   /** 메타데이터만 만든 파일이나 중단된 업로드를 구간 첨부로 등록하지 않는다. */
-  async assertStoredObject(asset: { id: string; sizeBytes: number }) {
+  async assertStoredObject(asset: { id: string; sizeBytes: number; storageKey?: string }) {
+    if (asset.storageKey && this.r2 && this.inR2(asset.storageKey)) {
+      const found = await this.r2.stat(asset.storageKey);
+      if (!found) throw new BadRequestException("파일 업로드가 완료되지 않았습니다. 파일을 다시 올린 뒤 첨부하세요.");
+      if (asset.sizeBytes <= 0 || found.sizeBytes !== asset.sizeBytes) throw new BadRequestException("업로드된 파일 크기가 일치하지 않습니다. 파일을 다시 올려 주세요.");
+      return;
+    }
     let fileStat;
     try { fileStat = await stat(this.objectPath(asset.id)); }
     catch { throw new BadRequestException("파일 업로드가 완료되지 않았습니다. 파일을 다시 올린 뒤 첨부하세요."); }
@@ -331,6 +374,12 @@ export class AssetsService {
       throw new NotFoundException("파일을 찾을 수 없어요");
     }
 
+    if (this.r2 && this.inR2(asset.storageKey)) {
+      const body = await this.r2.read(asset.storageKey);
+      if (!body) throw new NotFoundException("업로드된 파일 본문을 찾을 수 없어요");
+      return { asset, body, sizeBytes: body.length };
+    }
+
     const filePath = this.objectPath(assetId);
     try {
       const [body, fileStat] = await Promise.all([readFile(filePath), stat(filePath)]);
@@ -340,7 +389,22 @@ export class AssetsService {
     }
   }
 
+  // 재생 요청은 전체 파일을 메모리에 올리지 않고 필요한 byte 구간만 스트리밍한다.
+  async getMockObjectInfo(assetId: string) {
+    const asset = await this.prisma.asset.findUnique({ where: { id: assetId } });
+    if (!asset) throw new NotFoundException("파일을 찾을 수 없어요");
+    const filePath = this.objectPath(assetId);
+    try {
+      const fileStat = await stat(filePath);
+      if (!fileStat.isFile()) throw new Error("Not a file");
+      return { asset, filePath, sizeBytes: fileStat.size };
+    } catch {
+      throw new NotFoundException("파일 본문을 찾을 수 없어요. 업로드 상태를 확인해 주세요");
+    }
+  }
+
   private rolesForPurpose(purpose: AssetPurpose) {
+    if (purpose === AssetPurpose.SHOWCASE_IMAGE) return [ProductionRole.PRODUCER];
     if (purpose === AssetPurpose.MUSIC_TRACK) return MUSIC_EDIT_ROLES;
     if (purpose === AssetPurpose.SCRIPT_IMPORT || purpose === AssetPurpose.PERFORMANCE_MATERIAL) return SCRIPT_EDIT_ROLES;
     if (purpose === AssetPurpose.STAGE_EXPORT) return STAGE_EDIT_ROLES;
@@ -380,11 +444,14 @@ export class AssetsService {
     );
   }
 
-  private async sharesProductionWithOwner(ownerId: string, viewerId: string) {
+  /** 현재 프로필 사진만 유효한 공동 공연의 참여자에게 공유한다. */
+  private async sharesCurrentProfilePhoto(ownerId: string, viewerId: string, assetId: string) {
     const sharedMembership = await this.prisma.membership.findFirst({
       where: {
         userId: ownerId,
+        user: { photoAssetId: assetId },
         production: {
+          deletedAt: null,
           memberships: {
             some: { userId: viewerId }
           }
@@ -398,6 +465,33 @@ export class AssetsService {
   private buildStorageKey(prefix: string, ownerScope: string, fileName: string) {
     const safeFileName = fileName.trim().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "asset";
     return `${prefix}/${ownerScope}/${randomUUID()}-${safeFileName}`;
+  }
+
+  // 저장소 키에는 영문·숫자만 남긴다(원래 이름은 DB의 fileName에 있다). 한글 이름이 통째로 사라져도 확장자는 남긴다.
+  private safeFileName(fileName: string) {
+    const base = fileName.split(/[\\/]/).pop() ?? "";
+    const dot = base.lastIndexOf(".");
+    const extension = dot > 0 ? base.slice(dot).toLowerCase().replace(/[^a-z0-9.]+/g, "") : "";
+    const stem = (dot > 0 ? base.slice(0, dot) : base).trim().replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+    return `${stem || "file"}${extension}`;
+  }
+
+  /** 올리기·받기용 서명 주소. R2면 R2 직접 주소, 아니면 이 서버의 로컬 개발용 주소. */
+  private async signedUrl(
+    action: "upload" | "download",
+    asset: { id: string; storageKey: string; mime: string; fileName?: string | null; sizeBytes: number },
+    attachment = false
+  ) {
+    if (this.r2 && this.inR2(asset.storageKey)) {
+      // 큰 영상은 올리는 데 시간이 걸리므로 올리기 주소는 더 오래 유효하다.
+      const ttlSeconds = action === "upload" ? Number(this.config.get<string>("UPLOAD_URL_TTL") || 3600) : Number(this.config.get<string>("SIGNED_URL_TTL") || 600);
+      const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+      const url = action === "upload"
+        ? await this.r2.presignUpload(asset.storageKey, asset.sizeBytes, ttlSeconds)
+        : await this.r2.presignDownload(asset.storageKey, { mime: asset.mime, fileName: asset.fileName || "file", attachment }, ttlSeconds);
+      return { method: action === "upload" ? "PUT" : "GET", url, expiresAt };
+    }
+    return this.buildSignedUrl(action, asset.id, asset.storageKey);
   }
 
   private buildSignedUrl(action: "upload" | "download", assetId: string, storageKey: string) {

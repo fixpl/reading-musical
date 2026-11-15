@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from "@nestjs/common";
 import { Asset, AssetKind, Prisma, ProductionRole, SceneBlockType } from "@prisma/client";
 import { randomUUID } from "crypto";
 import mammoth from "mammoth";
@@ -69,10 +69,13 @@ export class ScriptImportService {
     await this.assertMembership(productionId, user);
     await this.entities.assertScript(productionId, scriptId);
     if (!dto.assetId && !dto.rawText?.trim()) {
-      throw new BadRequestException("assetId 또는 rawText 중 하나가 필요해요");
+      throw new BadRequestException("대본 파일 또는 직접 입력한 내용 중 하나가 필요해요");
     }
 
     const importSource = await this.resolveImportSource(productionId, dto, user);
+    if (importSource.rawText.length > 200000) {
+      throw new BadRequestException("한 번에 가져올 수 있는 대본은 20만 자예요. 막·장면별로 나누어 등록해 주세요.");
+    }
     const parsed = this.parseImportText(importSource.rawText, importSource.sourceType);
 
     const scriptImport = await this.prisma.scriptImport.create({
@@ -95,15 +98,21 @@ export class ScriptImportService {
     };
   }
 
-  async applyImport(productionId: string, scriptId: string, importId: string, dto: ApplyScriptImportDto, user: RequestUser) {
+  async applyImport(
+    productionId: string,
+    scriptId: string,
+    importId: string,
+    dto: ApplyScriptImportDto,
+    user: RequestUser
+  ) {
     await this.assertMembership(productionId, user);
     await this.entities.assertScript(productionId, scriptId);
     const scriptImport = await this.prisma.scriptImport.findFirst({ where: { id: importId, scriptId } });
     if (!scriptImport) {
-      throw new NotFoundException("가져오기 draft를 찾을 수 없어요");
+      throw new NotFoundException("가져오기 초안을 찾을 수 없어요");
     }
     if (scriptImport.status !== "DRAFT") {
-      throw new BadRequestException("DRAFT 상태만 대본에 반영할 수 있어요");
+      throw new BadRequestException("아직 반영하지 않은 초안만 대본에 반영할 수 있어요");
     }
 
     const parsed = dto.reviewedBlocks?.length
@@ -114,48 +123,60 @@ export class ScriptImportService {
     }
 
     const result = await this.prisma.$transaction(async (tx) => {
+      await tx.production.update({ where: { id: productionId }, data: { compositionRevision: { increment: 0 } } });
+      // 동시에 두 번 눌러도 한 요청만 DRAFT를 선점하도록 조건부 갱신으로 먼저 확정한다.
+      const claimed = await tx.scriptImport.updateMany({
+        where: { id: importId, scriptId, status: "DRAFT" },
+        data: { status: "APPLIED", appliedAt: new Date() }
+      });
+      if (claimed.count !== 1) {
+        throw new ConflictException("이미 적용된 가져오기예요");
+      }
+
       const created = { actIds: [] as string[], sceneIds: [] as string[], blockIds: [] as string[] };
+      const acts: Prisma.ActCreateManyInput[] = [];
+      const scenes: Prisma.SceneCreateManyInput[] = [];
+      const blocks: Prisma.SceneBlockCreateManyInput[] = [];
       let actOrder = await this.entities.getMaxActOrder(scriptId, tx);
 
       for (const actDraft of parsed.acts) {
-        const act = await tx.act.create({
-          data: {
-            scriptId,
-            order: ++actOrder,
-            title: actDraft.title || `가져온 막 ${actOrder}`
-          }
+        const actId = randomUUID();
+        acts.push({
+          id: actId,
+          scriptId,
+          order: ++actOrder,
+          title: actDraft.title || `가져온 막 ${actOrder}`
         });
-        created.actIds.push(act.id);
+        created.actIds.push(actId);
 
         for (const [sceneIndex, sceneDraft] of actDraft.scenes.entries()) {
-          const scene = await tx.scene.create({
-            data: {
-              actId: act.id,
-              order: sceneIndex + 1,
-              title: sceneDraft.title || `가져온 장 ${sceneIndex + 1}`
-            }
+          const sceneId = randomUUID();
+          scenes.push({
+            id: sceneId,
+            actId,
+            order: sceneIndex + 1,
+            title: sceneDraft.title || `가져온 장 ${sceneIndex + 1}`
           });
-          created.sceneIds.push(scene.id);
+          created.sceneIds.push(sceneId);
 
           for (const [blockIndex, blockDraft] of sceneDraft.blocks.entries()) {
-            const block = await tx.sceneBlock.create({
-              data: {
-                sceneId: scene.id,
-                order: blockIndex + 1,
-                type: blockDraft.type,
-                text: blockDraft.text,
-                cueLabel: blockDraft.speakerName || null
-              }
+            const blockId = randomUUID();
+            blocks.push({
+              id: blockId,
+              sceneId,
+              order: blockIndex + 1,
+              type: blockDraft.type,
+              text: blockDraft.text,
+              cueLabel: blockDraft.speakerName || null
             });
-            created.blockIds.push(block.id);
+            created.blockIds.push(blockId);
           }
         }
       }
 
-      await tx.scriptImport.update({
-        where: { id: importId },
-        data: { status: "APPLIED", appliedAt: new Date() }
-      });
+      if (acts.length) await tx.act.createMany({ data: acts });
+      if (scenes.length) await tx.scene.createMany({ data: scenes });
+      if (blocks.length) await tx.sceneBlock.createMany({ data: blocks });
 
       let versionId: string | null = null;
       if (dto.createVersion ?? true) {
@@ -163,7 +184,7 @@ export class ScriptImportService {
         const version = await tx.scriptVersion.create({
           data: {
             scriptId,
-            label: dto.versionName?.trim() || "import 반영본",
+            label: dto.versionName?.trim() || "가져오기 반영본",
             snapshot: snapshot as unknown as Prisma.InputJsonValue,
             authorId: user.id
           }
@@ -172,12 +193,12 @@ export class ScriptImportService {
       }
 
       return { ...created, versionId };
-    });
+    }, { timeout: 30000 });
 
     if (result.versionId) {
       await this.scriptNotifications.notifyScriptChange(productionId, scriptId, user.id, "script.version_created", {
         versionId: result.versionId,
-        label: dto.versionName?.trim() || "import 반영본",
+        label: dto.versionName?.trim() || "가져오기 반영본",
         importId
       });
     }
@@ -227,7 +248,7 @@ export class ScriptImportService {
     }
 
     if (!pastedText) {
-      throw new BadRequestException("assetId 또는 rawText 중 하나가 필요해요");
+      throw new BadRequestException("대본 파일 또는 직접 입력한 내용 중 하나가 필요해요");
     }
 
     return {
@@ -261,7 +282,7 @@ export class ScriptImportService {
   private resolveAssetSourceType(asset: ScriptImportAsset, requested?: ScriptImportSourceType) {
     const inferred = this.sourceTypeFromMime(asset.mime);
     if (requested && requested !== inferred) {
-      throw new BadRequestException("sourceType과 업로드 파일 형식이 일치하지 않아요");
+      throw new BadRequestException("선택한 파일 종류와 업로드 파일 형식이 일치하지 않아요");
     }
     return requested ?? inferred;
   }
@@ -341,17 +362,6 @@ export class ScriptImportService {
 
       const scene = ensureScene();
       const tempId = `tmp_${index + 1}`;
-      const speakerMatch = text.match(/^([^:：]{1,32})[:：]\s*(.+)$/);
-      if (speakerMatch) {
-        scene.blocks.push({
-          tempId,
-          type: SceneBlockType.DIALOGUE,
-          speakerName: speakerMatch[1].trim(),
-          text: speakerMatch[2].trim(),
-          confidence: 0.9
-        });
-        return;
-      }
       if (text.startsWith("♪")) {
         scene.blocks.push({ tempId, type: SceneBlockType.LYRIC, text: text.replace(/^♪\s*/, ""), confidence: 0.85 });
         return;
@@ -365,12 +375,23 @@ export class ScriptImportService {
         });
         return;
       }
-      if (/^(NOTE|메모)\s*[:：]/i.test(text)) {
+      if (/^(?:(?:NOTE|메모)\s*[:：]|※)/i.test(text)) {
         scene.blocks.push({
           tempId,
           type: SceneBlockType.NOTE,
-          text: text.replace(/^(NOTE|메모)\s*[:：]\s*/i, ""),
+          text: text.replace(/^(?:(?:NOTE|메모)\s*[:：]|※)\s*/i, ""),
           confidence: 0.8
+        });
+        return;
+      }
+      const speakerMatch = text.match(/^([^:：]{1,32})[:：]\s*(.+)$/);
+      if (speakerMatch) {
+        scene.blocks.push({
+          tempId,
+          type: SceneBlockType.DIALOGUE,
+          speakerName: speakerMatch[1].trim(),
+          text: speakerMatch[2].trim(),
+          confidence: 0.9
         });
         return;
       }

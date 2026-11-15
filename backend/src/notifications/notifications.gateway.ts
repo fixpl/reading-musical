@@ -10,9 +10,10 @@ import {
   WebSocketGateway,
   WebSocketServer
 } from "@nestjs/websockets";
-import { PlatformRole, ProductionRole } from "@prisma/client";
+import { PlatformRole } from "@prisma/client";
 import { Server, Socket } from "socket.io";
 import { PrismaService } from "../prisma/prisma.service";
+import { getReadingSocketAccess } from "./reading-socket-access";
 
 type NotificationSocketUser = {
   id: string;
@@ -24,6 +25,7 @@ type GuestReadingSocket = {
   accessId: string;
   productionId: string;
   eventId: string;
+  expiresAt: number;
 };
 
 type ReadingSessionJoinBody = {
@@ -38,16 +40,10 @@ type NotificationSocket = Socket & {
   };
 };
 
-const READING_VIEW_OPERATOR_ROLES = [
-  ProductionRole.PRODUCER,
-  ProductionRole.DIRECTOR,
-  ProductionRole.MUSIC_DIRECTOR,
-  ProductionRole.STAGE_MANAGER
-];
-
 @WebSocketGateway({ namespace: "/ws" })
 export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private readonly logger = new Logger(NotificationsGateway.name);
+  private readonly deliveries = new Map<string, Promise<void>>();
 
   @WebSocketServer()
   private server!: Server;
@@ -135,87 +131,190 @@ export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisco
       return { ok: false, message: "공연과 리딩 일정 정보가 필요해요." };
     }
 
-    const guestReading = client.data.guestReading;
-    if (guestReading) {
-      if (guestReading.productionId !== productionId || guestReading.eventId !== eventId) {
-        return { ok: false, message: "게스트 링크와 다른 리딩 일정에는 접근할 수 없어요." };
-      }
-      await client.join(this.readingSessionRoom(eventId));
-      return { ok: true, mode: "guest", room: this.readingSessionRoom(eventId) };
-    }
-
+    const guest = client.data.guestReading;
     const user = client.data.user;
-    if (!user) {
+    if (!guest && !user) {
       return { ok: false, message: "인증되지 않은 연결이에요." };
     }
-
-    const event = await this.prisma.scheduleEvent.findFirst({
-      where: { id: eventId, productionId },
-      select: { id: true }
-    });
-    if (!event) {
-      return { ok: false, message: "리딩 일정을 찾을 수 없어요." };
+    if (guest && (guest.productionId !== productionId || guest.eventId !== eventId)) {
+      return { ok: false, message: "게스트 링크와 다른 리딩 일정에는 접근할 수 없어요." };
     }
 
-    if (user.platformRole !== PlatformRole.SUPER_ADMIN) {
-      const membership = await this.prisma.membership.findFirst({
-        where: { productionId, userId: user.id },
-        include: { roles: true }
-      });
-      if (!membership) {
+    try {
+      const access = await getReadingSocketAccess(this.prisma, eventId, user ? [user.id] : [], guest ? [guest.accessId] : []);
+      const currentGuest = guest ? access.guests.get(guest.accessId) : undefined;
+      const currentUser = user ? access.users.get(user.id) : undefined;
+      if (access.productionId !== productionId || (guest ? (
+        !currentGuest || Math.min(currentGuest.expiresAt, guest.expiresAt) <= Date.now()
+      ) : (!currentUser?.allowed || currentUser.email !== user?.email))) {
+        if (guest) this.closeGuestSocket(client);
+        else if (access.productionId === productionId && (!currentUser || !currentUser.active || currentUser.email !== user?.email)) {
+          this.closeMemberSocket(client);
+        }
+        else this.endReadingAccess(client, eventId, productionId);
         return { ok: false, message: "이 리딩 일정에 접근할 권한이 없어요." };
       }
-
-      const roles = membership.roles.map((role) => role.role);
-      if (!this.hasAnyRole(roles, READING_VIEW_OPERATOR_ROLES)) {
-        const attendanceCount = await this.prisma.attendance.count({
-          where: { eventId, membershipId: membership.id }
-        });
-        if (attendanceCount === 0) {
-          return { ok: false, message: "참석자로 등록된 리딩 일정만 볼 수 있어요." };
-        }
-      }
+      if (!client.connected) return { ok: false, message: "연결이 종료됐어요." };
+      await client.join(this.readingSessionRoom(eventId));
+      return { ok: true, mode: guest ? "guest" : "member", room: this.readingSessionRoom(eventId) };
+    } catch {
+      return { ok: false, message: "접근 권한을 확인하지 못했어요. 잠시 후 다시 시도해 주세요." };
     }
-
-    await client.join(this.readingSessionRoom(eventId));
-    return { ok: true, mode: "member", room: this.readingSessionRoom(eventId) };
   }
 
   emitNotificationCreated(userId: string, notification: unknown) {
-    this.server?.to(this.userRoom(userId)).emit("notification.created", notification);
-    this.emitSummaryChanged(userId);
+    return this.emitUserEvents(userId, [["notification.created", notification], ["notification.summary_changed", { userId }]]);
   }
 
   emitNotificationUpdated(userId: string, notification: unknown) {
-    this.server?.to(this.userRoom(userId)).emit("notification.updated", notification);
-    this.emitSummaryChanged(userId);
+    return this.emitUserEvents(userId, [["notification.updated", notification], ["notification.summary_changed", { userId }]]);
   }
 
   emitSummaryChanged(userId: string) {
-    this.server?.to(this.userRoom(userId)).emit("notification.summary_changed", { userId });
+    return this.emitUserEvents(userId, [["notification.summary_changed", { userId }]]);
   }
 
   emitReadingSessionEvent(eventId: string, event: unknown) {
-    const type = this.readingEventType(event);
+    return this.enqueueDelivery(this.readingSessionRoom(eventId), () => this.deliverReadingEvent(eventId, event));
+  }
+
+  /** 철회된 게스트 링크로 붙어 있는 소켓을 모두 끊는다. */
+  disconnectGuestAccess(accessId: string) {
+    this.forEachGuestSocket((socket) => {
+      if (socket.data.guestReading?.accessId === accessId) this.closeGuestSocket(socket);
+    });
+  }
+
+  private forEachGuestSocket(callback: (socket: NotificationSocket) => void) {
+    for (const socket of this.connectedSockets()) {
+      if (socket.data?.guestReading) callback(socket);
+    }
+  }
+
+  private closeGuestSocket(socket: NotificationSocket) {
+    socket.emit("notification.error", { message: "게스트 리딩 링크가 만료되었거나 회수됐어요." });
+    socket.disconnect(true);
+  }
+
+  emitBoardChanged(userIds: string[], productionId: string, postId: string) {
+    // 본문은 현재 API 권한으로 다시 조회한다. 변경 알림에는 식별자만 보낸다.
+    return Promise.all([...new Set(userIds)].map((userId) =>
+      this.emitUserEvents(userId, [["board.changed", { productionId, postId }]])
+    ));
+  }
+
+  /** 비동기 권한 조회가 페이지 동기화·큐 발화 순서를 뒤집지 않도록 room별로 직렬화한다. */
+  private enqueueDelivery(key: string, deliver: () => Promise<void>) {
+    const next = (this.deliveries.get(key) ?? Promise.resolve()).then(deliver).catch(() => {
+      // DB 오류에서는 보호된 payload를 전송하지 않는다. 예외 원문에는 인증 정보를 남기지 않는다.
+      this.logger.warn("Socket authorization failed; protected delivery skipped");
+    });
+    this.deliveries.set(key, next);
+    void next.then(() => { if (this.deliveries.get(key) === next) this.deliveries.delete(key); });
+    return next;
+  }
+
+  private connectedSockets(): NotificationSocket[] {
+    // namespace gateway의 sockets는 Map이다. 연결 전·종료 뒤에는 전송 대상이 없다.
+    const sockets = (this.server as unknown as { sockets?: Map<string, NotificationSocket> } | undefined)?.sockets;
+    return sockets && typeof sockets.values === "function" ? Array.from(sockets.values()) : [];
+  }
+
+  private socketsInRoom(room: string) {
+    return this.connectedSockets().filter((socket) => socket.connected && socket.rooms.has(room));
+  }
+
+  private async deliverReadingEvent(eventId: string, event: unknown) {
     const room = this.readingSessionRoom(eventId);
-    this.server?.to(room).emit("reading-session.event", event);
-    this.server?.to(room).emit(`reading-session.${type}`, event);
+    const sockets = this.socketsInRoom(room);
+    if (!sockets.length) return;
+    const access = await getReadingSocketAccess(
+      this.prisma,
+      eventId,
+      sockets.flatMap((socket) => socket.data.user ? [socket.data.user.id] : []),
+      sockets.flatMap((socket) => socket.data.guestReading ? [socket.data.guestReading.accessId] : [])
+    );
+    const type = this.readingEventType(event);
+    for (const socket of sockets) {
+      // 조회 중 철회·disconnect된 연결에는 보호된 payload를 보내지 않는다.
+      if (!socket.connected || !socket.rooms.has(room)) continue;
+      const guest = socket.data.guestReading;
+      const user = socket.data.user;
+      if (guest) {
+        const current = access.guests.get(guest.accessId);
+        if (guest.eventId !== eventId || !current || current.productionId !== guest.productionId ||
+          Math.min(current.expiresAt, guest.expiresAt) <= Date.now()) {
+          this.closeGuestSocket(socket);
+          continue;
+        }
+      } else if (user) {
+        const current = access.users.get(user.id);
+        if (access.productionId && (!current || !current.active || current.email !== user.email)) {
+          this.closeMemberSocket(socket);
+          continue;
+        }
+        if (!current?.allowed) {
+          this.endReadingAccess(socket, eventId, access.productionId);
+          continue;
+        }
+      } else {
+        this.endReadingAccess(socket, eventId, access.productionId);
+        continue;
+      }
+      socket.emit("reading-session.event", event);
+      socket.emit(`reading-session.${type}`, event);
+    }
+  }
+
+  private endReadingAccess(socket: NotificationSocket, eventId: string, productionId: string | null) {
+    void socket.leave(this.readingSessionRoom(eventId));
+    socket.emit("reading-session.access-ended", { productionId, eventId, message: "이 리딩 일정에 접근할 권한이 없어요." });
+  }
+
+  private closeMemberSocket(socket: NotificationSocket) {
+    socket.emit("notification.error", { message: "세션이 만료됐어요. 다시 로그인해 주세요." });
+    socket.disconnect(true);
+  }
+
+  private emitUserEvents(userId: string, events: Array<[string, unknown]>) {
+    const room = this.userRoom(userId);
+    return this.enqueueDelivery(room, async () => {
+      const sockets = this.socketsInRoom(room);
+      if (!sockets.length) return;
+      const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { id: true, email: true, status: true } });
+      for (const socket of sockets) {
+        if (!socket.connected || !socket.rooms.has(room)) continue;
+        if (!user || user.status !== "ACTIVE" || socket.data.user?.id !== user.id || socket.data.user.email !== user.email) {
+          this.closeMemberSocket(socket);
+          continue;
+        }
+        for (const [name, payload] of events) socket.emit(name, payload);
+      }
+    });
   }
 
   private async connectGuestReading(client: NotificationSocket, token: string) {
     try {
       const access = await this.prisma.guestReadingAccess.findUnique({
         where: { token },
-        select: { id: true, productionId: true, eventId: true, expiresAt: true, revokedAt: true }
+        select: {
+          id: true,
+          productionId: true,
+          eventId: true,
+          expiresAt: true,
+          revokedAt: true,
+          production: { select: { deletedAt: true } }
+        }
       });
-      if (!access || access.revokedAt || access.expiresAt.getTime() <= Date.now()) {
+      if (!access || access.revokedAt || access.production.deletedAt || access.expiresAt.getTime() <= Date.now()) {
         throw new Error("inactive guest token");
       }
 
       client.data.guestReading = {
         accessId: access.id,
         productionId: access.productionId,
-        eventId: access.eventId
+        eventId: access.eventId,
+        expiresAt: access.expiresAt.getTime()
       };
       await client.join(this.readingSessionRoom(access.eventId));
       client.emit("reading-session.connected", {
@@ -230,12 +329,10 @@ export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisco
     }
   }
 
+  // 토큰은 auth·Authorization 헤더로만 받는다. query string은 프록시 로그에 남아 받지 않는다.
   private extractToken(client: NotificationSocket) {
     const authToken = this.stringValue(client.handshake.auth?.token);
     if (authToken) return authToken;
-
-    const queryToken = this.stringValue(client.handshake.query?.token);
-    if (queryToken) return queryToken;
 
     const header = client.handshake.headers.authorization;
     if (typeof header === "string" && header.toLowerCase().startsWith("bearer ")) {
@@ -247,9 +344,7 @@ export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisco
   private extractGuestReadingToken(client: NotificationSocket) {
     return (
       this.stringValue(client.handshake.auth?.guestReadingToken) ||
-      this.stringValue(client.handshake.auth?.guestToken) ||
-      this.stringValue(client.handshake.query?.guestReadingToken) ||
-      this.stringValue(client.handshake.query?.guestToken)
+      this.stringValue(client.handshake.auth?.guestToken)
     );
   }
 
@@ -259,10 +354,6 @@ export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisco
       if (typeof type === "string" && type.trim()) return type.trim();
     }
     return "event";
-  }
-
-  private hasAnyRole(roles: ProductionRole[], allowed: ProductionRole[]) {
-    return roles.some((role) => allowed.includes(role));
   }
 
   private stringValue(value: unknown): string | null {

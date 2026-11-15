@@ -1,12 +1,14 @@
+/* 한글 폰트를 직접 싣는다(기기 기본 폰트에 의존하지 않도록). 쓰는 글자 조각만 내려받는 동적 서브셋. */
+@import "pretendard/dist/web/variable/pretendardvariable-dynamic-subset.css";
 @import "tailwindcss";
 @import "tw-animate-css";
 
 @custom-variant dark (&:is(.dark *));
 
 /*
- * 리딩스테이지 디자인 토큰
+ * 아트브릿지 디자인 토큰
  * 뉴트럴: zinc 계열 / 포인트: 앰버(무대 조명)
- * 다크(나이트)가 기본 테마이며 라이트는 선택.
+ * 밝은 화면의 버튼에서도 흰 글자가 읽히도록 앰버 명도를 낮춘다.
  */
 :root {
 	--radius: 0.625rem;
@@ -16,7 +18,8 @@
 	--card-foreground: oklch(0.141 0.005 285.823);
 	--popover: oklch(1 0 0);
 	--popover-foreground: oklch(0.141 0.005 285.823);
-	--primary: oklch(0.666 0.179 58.318);
+	--primary: oklch(0.56 0.15 55);
+	--primary-hover: color-mix(in oklab, var(--primary), var(--foreground) 10%);
 	--primary-foreground: oklch(0.985 0 0);
 	--secondary: oklch(0.967 0.001 286.375);
 	--secondary-foreground: oklch(0.21 0.006 285.885);
@@ -26,9 +29,11 @@
 	--accent-foreground: oklch(0.21 0.006 285.885);
 	--destructive: oklch(0.577 0.245 27.325);
 	--destructive-foreground: oklch(0.985 0 0);
+	--success: oklch(0.527 0.154 150.069);
+	--warning: oklch(0.555 0.163 48.998);
 	--border: oklch(0.92 0.004 286.32);
 	--input: oklch(0.92 0.004 286.32);
-	--ring: oklch(0.666 0.179 58.318);
+	--ring: var(--primary);
 	--chart-1: oklch(0.666 0.179 58.318);
 	--chart-2: oklch(0.546 0.245 262.881);
 	--chart-3: oklch(0.541 0.281 293.009);
@@ -36,12 +41,12 @@
 	--chart-5: oklch(0.586 0.253 17.585);
 	--sidebar: oklch(0.967 0.001 286.375);
 	--sidebar-foreground: oklch(0.141 0.005 285.823);
-	--sidebar-primary: oklch(0.666 0.179 58.318);
+	--sidebar-primary: var(--primary);
 	--sidebar-primary-foreground: oklch(0.985 0 0);
 	--sidebar-accent: oklch(0.92 0.004 286.32);
 	--sidebar-accent-foreground: oklch(0.21 0.006 285.885);
 	--sidebar-border: oklch(0.92 0.004 286.32);
-	--sidebar-ring: oklch(0.666 0.179 58.318);
+	--sidebar-ring: var(--primary);
 }
 
 .dark {
@@ -61,6 +66,8 @@
 	--accent-foreground: oklch(0.985 0 0);
 	--destructive: oklch(0.704 0.191 22.216);
 	--destructive-foreground: oklch(0.985 0 0);
+	--success: oklch(0.792 0.209 151.711);
+	--warning: oklch(0.828 0.189 84.429);
 	--border: oklch(1 0 0 / 10%);
 	--input: oklch(1 0 0 / 15%);
 	--ring: oklch(0.769 0.188 70.08 / 60%);
@@ -91,6 +98,7 @@
 	--color-popover: var(--popover);
 	--color-popover-foreground: var(--popover-foreground);
 	--color-primary: var(--primary);
+	--color-primary-hover: var(--primary-hover);
 	--color-primary-foreground: var(--primary-foreground);
 	--color-secondary: var(--secondary);
 	--color-secondary-foreground: var(--secondary-foreground);
@@ -100,6 +108,8 @@
 	--color-accent-foreground: var(--accent-foreground);
 	--color-destructive: var(--destructive);
 	--color-destructive-foreground: var(--destructive-foreground);
+	--color-success: var(--success);
+	--color-warning: var(--warning);
 	--color-border: var(--border);
 	--color-input: var(--input);
 	--color-ring: var(--ring);
@@ -137,3 +147,65 @@
 		font-family: var(--font-sans);
 	}
 }
+
+/* ── 타이포·모션 기본기 ───────────────────────────────────────────── */
+@layer base {
+	/* 한국어는 단어 단위로 줄바꿈하고, 너무 긴 덩어리만 강제로 끊는다. */
+	body {
+		word-break: keep-all;
+		overflow-wrap: break-word;
+		font-feature-settings: "tnum" 0;
+	}
+	h1, h2, h3, h4 { text-wrap: balance; }
+	p, li, dd, figcaption { text-wrap: pretty; }
+	code, kbd, pre, .font-mono { word-break: normal; }
+	/* 키보드 이동 때만 보이는 초점 표시 */
+	:focus-visible {
+		outline: 2px solid var(--color-ring);
+		outline-offset: 2px;
+		border-radius: 0.25rem;
+	}
+	/* <details>가 부드럽게 열리고 닫히도록(지원 브라우저만) */
+	:root { interpolate-size: allow-keywords; }
+	details::details-content {
+		block-size: 0;
+		overflow: clip;
+		transition: block-size 0.25s ease, content-visibility 0.25s allow-discrete;
+	}
+	details[open]::details-content { block-size: auto; }
+}
+
+/* 페이지 이동은 전환 효과 없이 바로 바뀐다(화면이 흔들리거나 새로고침처럼 보이지 않도록). */
+
+/* ── 스크롤하면 나타나는 요소: 지원하는 브라우저는 CSS만으로(자바스크립트 없이 부드럽게) ── */
+@supports (animation-timeline: view()) {
+	.sd-reveal {
+		animation: sd-in linear both;
+		animation-timeline: view();
+		animation-range: entry 4% entry 38%;
+	}
+	@keyframes sd-in { from { opacity: 0; transform: translateY(22px); } to { opacity: 1; transform: none; } }
+	@media (prefers-reduced-motion: reduce) { .sd-reveal { animation: none; } }
+}
+
+/* 터치 기기에서는 공통 버튼의 조작 면적을 확보한다. 타임라인 클립의 크기는 바꾸지 않는다. */
+@media (pointer: coarse) {
+	[data-slot="button"],
+	[data-slot="sidebar-menu-button"],
+	[data-slot="select-trigger"],
+	input[data-slot="input"] { min-height: 2.75rem; }
+	[data-slot="button"][data-size^="icon"] { min-width: 2.75rem; }
+}
+
+.skip-link {
+	position: fixed;
+	top: 0.75rem;
+	left: 0.75rem;
+	z-index: 100;
+	transform: translateY(calc(-100% - 1rem));
+	border-radius: var(--radius);
+	background: var(--primary);
+	color: var(--primary-foreground);
+	padding: 0.75rem 1rem;
+}
+.skip-link:focus { transform: none; }

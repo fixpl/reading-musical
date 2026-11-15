@@ -6,6 +6,7 @@ const root = path.resolve(__dirname, '../..');
 const contract = require(path.join(root, 'backend/dist/src/ai/ai-contract.js'));
 const { RolesGuard } = require(path.join(root, 'backend/dist/src/common/guards/roles.guard.js'));
 const { PLATFORM_ROLES_KEY } = require(path.join(root, 'backend/dist/src/common/decorators/platform-roles.decorator.js'));
+const { PRODUCTION_ROLES_KEY } = require(path.join(root, 'backend/dist/src/common/decorators/production-roles.decorator.js'));
 const ts = require(path.join(root, 'backend/node_modules/typescript'));
 const compiled = ts.transpileModule(fs.readFileSync(path.join(root, 'frontend/src/lib/domain/performance-timeline.ts'), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } });
 const helper = { exports: {} };
@@ -15,6 +16,16 @@ const calendarCompiled = ts.transpileModule(fs.readFileSync(path.join(root, 'fro
 const calendarModule = { exports: {} };
 new Function('module', 'exports', calendarCompiled.outputText)(calendarModule, calendarModule.exports);
 const { groupCalendarDays } = calendarModule.exports;
+const labelsCompiled = ts.transpileModule(fs.readFileSync(path.join(root, 'frontend/src/lib/domain/labels.ts'), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } });
+const labelsModule = { exports: {} };
+new Function('module', 'exports', labelsCompiled.outputText)(labelsModule, labelsModule.exports);
+const scheduleDisplayCompiled = ts.transpileModule(fs.readFileSync(path.join(root, 'frontend/src/lib/domain/schedule-display.ts'), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } });
+const scheduleDisplayModule = { exports: {} };
+new Function('module', 'exports', 'require', scheduleDisplayCompiled.outputText)(scheduleDisplayModule, scheduleDisplayModule.exports, (moduleName) => {
+  assert.equal(moduleName, './labels');
+  return labelsModule.exports;
+});
+const { groupScheduleConflicts, meetingHttpUrl, scheduleAttendanceSummary } = scheduleDisplayModule.exports;
 const { AiService } = require(path.join(root, 'backend/dist/src/ai/ai.service.js'));
 const { CueSheetService } = require(path.join(root, 'backend/dist/src/cue-sheet/cue-sheet.service.js'));
 
@@ -77,6 +88,29 @@ async function main() {
   const crossMonth = groupCalendarDays([{ startAt: localIso(7, 31, 23), endAt: localIso(8, 1, 1) }], (item) => item, 2026, 8);
   assert.equal(crossMonth.has('2026-08-31'), true);
   assert.equal(crossMonth.has('2026-09-01'), true);
+  const personalConflict = { userId: 'one', userName: '같은 이름', type: 'AVAILABILITY', reason: '개인 일정과 겹침', startAt: localIso(8, 7, 19), endAt: localIso(8, 7, 20) };
+  const groupedConflicts = groupScheduleConflicts([
+    personalConflict,
+    { ...personalConflict },
+    { ...personalConflict, type: 'EVENT', reason: '합본 리허설' },
+    { ...personalConflict, userId: 'two', type: 'EVENT', reason: '다른 공연 일정과 겹침' }
+  ]);
+  assert.equal(groupedConflicts.length, 2, 'Different people with the same name must not merge');
+  assert.deepEqual(groupedConflicts[0].labels, ['개인 일정', '공연 일정']);
+  assert.equal(groupedConflicts[0].details.length, 2, 'Identical conflicts must not repeat');
+  assert.ok(groupedConflicts[0].details[0].includes(labelsModule.exports.formatDateTime(personalConflict.startAt)));
+  assert.ok(groupedConflicts[0].details[0].includes(labelsModule.exports.formatDateTime(personalConflict.endAt)));
+  assert.equal(groupedConflicts[0].details[0].includes('개인 일정과 겹침'), false);
+  assert.ok(groupedConflicts[0].details[1].includes('합본 리허설'));
+  assert.deepEqual(groupedConflicts[1].labels, ['공연 일정']);
+  assert.equal(groupedConflicts[1].details[0].includes('다른 공연 일정과 겹침'), false);
+  for (const unsafe of ['javascript:alert(1)', 'data:text/html,test', 'file:///tmp/test', '/meeting', '', null]) {
+    assert.equal(meetingHttpUrl(unsafe), null);
+  }
+  assert.equal(meetingHttpUrl(' https://example.com/room '), 'https://example.com/room');
+  assert.equal(meetingHttpUrl('http://example.com/room'), 'http://example.com/room');
+  assert.equal(scheduleAttendanceSummary([{ status: 'ACCEPTED' }, { status: 'DECLINED' }, { status: 'TENTATIVE' }, { status: 'INVITED' }]), '참석 1 · 불참 1 · 미정 1 · 미응답 1 / 4');
+  assert.equal(scheduleAttendanceSummary([]), '참석 0 · 불참 0 · 미정 0 · 미응답 0 / 0');
   assert.equal(parseTimelineTime('01:02.250'), 62250);
   assert.equal(parseTimelineTime('0'), 0);
   assert.equal(parseTimelineTime(''), null);
@@ -90,15 +124,18 @@ async function main() {
   const automatic = buildPerformanceTimeline([], [{ id: 'untimed', trackId: 'track', sceneId: null, cueNumber: '2', content: '자동' }]);
   assert.equal(automatic.items[0].estimated, true);
   let callerOrganization = 'other';
-  const reflector = { getAllAndOverride: (key) => key === PLATFORM_ROLES_KEY ? ['SUPER_ADMIN', 'ORG_ADMIN'] : ['ACTOR'] };
+  const reflector = {
+    get: () => 'productions',
+    getAllAndOverride: (key) => key === PLATFORM_ROLES_KEY ? ['SUPER_ADMIN', 'ORG_ADMIN'] : key === PRODUCTION_ROLES_KEY ? ['ACTOR'] : undefined
+  };
   const prisma = { production: { findUnique: async () => ({ organizationId: 'production-org' }) }, user: { findUnique: async () => ({ organizationId: callerOrganization }) }, membership: { findFirst: async () => null } };
   const guard = new RolesGuard(reflector, prisma);
   const context = (role) => ({ getHandler() {}, getClass() {}, switchToHttp: () => ({ getRequest: () => ({ user: { id: 'user', platformRole: role }, params: { productionId: 'production' } }) }) });
-  await assert.rejects(guard.canActivate(context('ORG_ADMIN')), (error) => error.getStatus() === 403);
+  await assert.rejects(guard.canActivate(context('ORG_ADMIN')), (error) => typeof error.getStatus === 'function' && error.getStatus() === 403);
   callerOrganization = 'production-org';
   assert.equal(await guard.canActivate(context('ORG_ADMIN')), true);
   assert.equal(await guard.canActivate(context('SUPER_ADMIN')), true);
-  await assert.rejects(guard.canActivate(context('MEMBER')), (error) => error.getStatus() === 403);
+  await assert.rejects(guard.canActivate(context('MEMBER')), (error) => typeof error.getStatus === 'function' && error.getStatus() === 403);
   // Syntax compilation only: no Vite config, dotenv files, server, or browser is loaded.
   // This does not replace Svelte type checking or a production bundle.
   const { compile } = require(require.resolve('svelte/compiler', { paths: [path.join(root, 'frontend')] }));
@@ -107,7 +144,8 @@ async function main() {
     'frontend/src/routes/app/schedule/+page.svelte',
     'frontend/src/routes/app/p/[pid]/live/+page.svelte',
     'frontend/src/routes/+page.svelte',
-    'frontend/src/lib/components/landing/ProductPreview.svelte',
+    'frontend/src/lib/components/landing/HeroDemo.svelte',
+    'frontend/src/lib/components/landing/MyProductionsBoard.svelte',
     'frontend/src/lib/components/landing/InquiryForm.svelte'
   ];
   for (const relative of svelteFiles) {

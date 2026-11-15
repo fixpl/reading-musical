@@ -1,4 +1,5 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, UseGuards, UseInterceptors } from "@nestjs/common";
+import { MaskEmailsInterceptor } from "../common/mask-emails.interceptor";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { PlatformRoles } from "../common/decorators/platform-roles.decorator";
 import { ProductionRoles } from "../common/decorators/production-roles.decorator";
@@ -17,6 +18,7 @@ const CASTING_EDIT_ROLES = ["PRODUCER", "DIRECTOR"] as const;
 @PlatformRoles("SUPER_ADMIN", "ORG_ADMIN")
 @ProductionRoles(...ALL_PRODUCTION_ROLES)
 @UseGuards(JwtAuthGuard, RolesGuard)
+@UseInterceptors(MaskEmailsInterceptor)
 @Controller("productions/:pid")
 export class CastingController {
   constructor(private readonly castingService: CastingService) {}

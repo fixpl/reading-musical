@@ -13,8 +13,8 @@ export function referenceFileMetadata(file: { name: string; size: number }) {
   const name = file.name.trim();
   const extension = name.lastIndexOf(".") > 0 ? name.slice(name.lastIndexOf(".") + 1).toLowerCase() : "";
   const mimeType = Object.prototype.hasOwnProperty.call(MIME, extension) ? MIME[extension] : undefined;
-  if (!mimeType) throw new Error("참고 첨부는 PDF·PNG·JPG·WEBP·DOCX·TXT 파일을 지원합니다.");
-  if (!Number.isInteger(file.size) || file.size <= 0 || file.size > REFERENCE_MAX_BYTES) throw new Error("빈 파일은 첨부할 수 없으며 파일당 최대 50MB까지 가능합니다.");
+  if (!mimeType) throw new Error("참고 첨부는 PDF·PNG·JPG·WEBP·DOCX·TXT 파일을 지원해요.");
+  if (!Number.isInteger(file.size) || file.size <= 0 || file.size > REFERENCE_MAX_BYTES) throw new Error("빈 파일은 첨부할 수 없어요. 파일은 하나당 최대 50MB까지 올릴 수 있어요.");
   return { fileName: file.name, mimeType, size: file.size };
 }
 export function isReferenceAsset(asset: Pick<MediaAsset, "mime" | "sizeBytes">) {
@@ -33,10 +33,10 @@ export function fileSizeLabel(bytes: number) {
   return `${bytes} B`;
 }
 export function referenceUrls(rawUrl: string) {
-  if (!/^(https?:\/\/|\/(?!\/))/i.test(rawUrl)) throw new Error("유효하지 않은 파일 주소입니다.");
+  if (!/^(https?:\/\/|\/(?!\/))/i.test(rawUrl)) throw new Error("올바른 파일 주소가 아니에요.");
   const relative = rawUrl.startsWith("/");
   const parsed = new URL(rawUrl, "https://relative.invalid");
-  if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error("유효하지 않은 파일 주소입니다.");
+  if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error("올바른 파일 주소가 아니에요.");
   const render = () => relative ? `${parsed.pathname}${parsed.search}${parsed.hash}` : parsed.href;
   const open = render();
   parsed.searchParams.set("download", "1");

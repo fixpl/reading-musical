@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { onDestroy } from "svelte";
+  import { onDestroy, tick } from "svelte";
+  import { syncMedia } from "$lib/actions/sync-media";
+  import { activeSection, mediaAt, sourceTimeSeconds, type CompositionSection } from "$lib/domain/composition";
   import PlayIcon from "@lucide/svelte/icons/play";
   import PauseIcon from "@lucide/svelte/icons/pause";
   import PencilIcon from "@lucide/svelte/icons/pencil";
@@ -27,6 +29,7 @@
     character?: { id: string; name: string } | null;
     durationSec?: number | null;
     startMs?: number | null;
+    fromComposition?: boolean;
   };
 
   type ScriptBlock = {
@@ -45,6 +48,7 @@
     summary?: string | null;
     act: { id: string; title: string; order: number };
     blocks?: ScriptBlock[];
+    range?: { startMs: number; durationMs: number };
   };
 
   type BackgroundVideo = {
@@ -52,12 +56,18 @@
     mime: string;
   };
 
+  // 장면별 배경 영상·이미지(장·막 구성의 반복 배경). 장면 시작부터의 경과 시간으로 재생한다.
+  type SceneVisual = { url: string; kind: "VIDEO" | "IMAGE"; loop: boolean; sourceStartSec: number; label?: string };
+
   let {
     scenes,
     tracks,
     cues,
     editableTrackIds = [],
     background = null,
+    sceneVisuals = {},
+    compositionSections = [],
+    signedMediaUrls = {},
     canEditScript = false,
     onEditCue,
     onAddCue,
@@ -66,13 +76,17 @@
     onResizeCue,
     onReorderCue,
     onMoveCue,
-    onMoveBlock
+    onMoveBlock,
+    totalMs = null
   }: {
     scenes: Scene[];
     tracks: Track[];
     cues: Cue[];
     editableTrackIds?: string[];
     background?: BackgroundVideo | null;
+    sceneVisuals?: Record<string, SceneVisual>;
+    compositionSections?: CompositionSection[];
+    signedMediaUrls?: Record<string, string>;
     canEditScript?: boolean;
     onEditCue?: (cueId: string) => void;
     onAddCue?: (trackId: string, sceneId: string | null) => void;
@@ -82,6 +96,7 @@
     onReorderCue?: (cueId: string, sceneId: string | null, orderedTrackCueIds: string[]) => void;
     onMoveCue?: (cueId: string, startMs: number) => void;
     onMoveBlock?: (blockId: string, startMs: number | null, durationMs: number | null) => void;
+    totalMs?: number | null;
   } = $props();
 
   // 목업(큐시트 스튜디오)의 부서 팔레트 — 표준 트랙은 고정색, 나머지는 순환
@@ -95,7 +110,11 @@
   };
   const FALLBACK_COLORS = ["#7c3aed", "#2563eb", "#d97706", "#0d9488", "#db2777", "#65a30d", "#dc2626", "#0891b2"];
 
-  const PXM = 48; // px per (가상)분 — 짧은 큐 번호도 겹치지 않게 충분한 가로 폭을 확보한다.
+  // 가로 확대 — 영상 편집기처럼 확대·축소한다(분당 픽셀). 기본 48은 짧은 큐 번호도 겹치지 않는 폭.
+  const ZOOM_MIN = 6;
+  const ZOOM_MAX = 480;
+  let pxm = $state(48);
+  const PXM = $derived(pxm);
   const LABEL_W = 104;
 
   const trackColor = $derived.by(() => {
@@ -152,12 +171,29 @@
         perTrackSec.set(cue.trackId, (perTrackSec.get(cue.trackId) ?? 0) + layoutSec(cue));
       }
       const sceneSec = Math.max(DEFAULT_CUE_SEC, ...perTrackSec.values());
+      // 대본 줄에 실제 시각(startMs)이 있으면 그 시계를 따른다 — 그래야 막·장 밴드와 "지금 장면"이 대본·큐 레인, 구성·연습 화면의 시간과 같아진다.
+      // (시각이 없는 옛 대본은 아래처럼 큐 길이를 이어 붙여 계산한다.)
+      const timedBlocks = blocks.filter((block) => block.startMs != null);
+      if (timedBlocks.length) {
+        const startMs = Math.min(...timedBlocks.map((block) => block.startMs!));
+        const endMs = Math.max(...timedBlocks.map((block) => block.startMs! + (block.durationMs ?? DEFAULT_BLOCK_MS)));
+        const start = Math.max(startMs / 60000, cursor);
+        const dur = Math.max(0.5 / 60, (endMs - startMs) / 60000);
+        list.push({ id, title, actId, actTitle, summary, start, dur, cues: segCues, firstQ: segCues[0]?.cueNumber ?? "—", blocks });
+        cursor = start + dur;
+        return;
+      }
       const dur = Math.max(0.5, sceneSec / 60);
       list.push({ id, title, actId, actTitle, summary, start: cursor, dur, cues: segCues, firstQ: segCues[0]?.cueNumber ?? "—", blocks });
       cursor += dur;
     };
     for (const scene of scenes) {
-      push(scene.id, scene.title, scene.act.id, scene.act.title, scene.summary ?? null, scene.blocks ?? []);
+      if (scene.range) {
+        const segCues = bySceneCues.get(scene.id) ?? [];
+        list.push({ id: scene.id, title: scene.title, actId: scene.act.id, actTitle: scene.act.title, summary: scene.summary ?? null,
+          start: scene.range.startMs / 60000, dur: scene.range.durationMs / 60000, cues: segCues, firstQ: segCues[0]?.cueNumber ?? "—", blocks: scene.blocks ?? [] });
+        cursor = Math.max(cursor, (scene.range.startMs + scene.range.durationMs) / 60000);
+      } else push(scene.id, scene.title, scene.act.id, scene.act.title, scene.summary ?? null, scene.blocks ?? []);
     }
     if (bySceneCues.has("__none")) {
       push("__none", "장면 미지정", "__none", "", null, []);
@@ -165,7 +201,7 @@
     return list;
   });
 
-  const segmentsTotal = $derived(segments.reduce((sum, seg) => sum + seg.dur, 0));
+  const segmentsTotal = $derived(segments.reduce((end, seg) => Math.max(end, seg.start + seg.dur), 0));
 
   // ── 대본 블록 타임라인 — 블록마다 시작/길이(ms)를 명시하면 배경 영상 기준 그 시각에 놓인다.
   // 미지정 블록은 앞 블록 끝에 이어붙이는 자동 흐름 배치(점선으로 표시).
@@ -218,7 +254,7 @@
   let videoMuted = $state(true);
 
   const total = $derived(
-    Math.max(segmentsTotal, blockEndMin, cueEndMin, background && videoDurationSec ? videoDurationSec / 60 : 0)
+    totalMs !== null ? totalMs / 60000 : Math.max(segmentsTotal, blockEndMin, cueEndMin, background && videoDurationSec ? videoDurationSec / 60 : 0)
   );
 
   const actBands = $derived.by(() => {
@@ -234,7 +270,7 @@
   // ── 상태 ──
   let time = $state(0);
   let playing = $state(false);
-  let speed = $state(20);
+  let speed = $state(1);
   let role = $state("all"); // "all" | trackId
   let selectedCueId = $state<string | null>(null);
   // 대본 레인에서 선택한 블록 — 인스펙터에서 시작/길이를 직접 고칠 수 있다.
@@ -256,12 +292,33 @@
   });
 
   const currentSeg = $derived(segments.reduce((cur, seg) => (time >= seg.start ? seg : cur), segments[0]));
+  // 지금 장면의 배경(단일 기준 영상이 연결된 경우는 그것을 우선한다).
+  const backgroundClip = $derived(mediaAt(compositionSections, activeSection(compositionSections, time * 60000), "BACKGROUND", time * 60000));
+  const sceneVisual = $derived.by<SceneVisual | null>(() => {
+    if (compositionSections.length) {
+      const media = backgroundClip?.media;
+      return media && signedMediaUrls[media.assetId] ? { url: signedMediaUrls[media.assetId], kind: media.asset.kind === "IMAGE" ? "IMAGE" : "VIDEO", loop: media.loop, sourceStartSec: media.sourceStartMs / 1000, label: media.label } : null;
+    }
+    return currentSeg ? sceneVisuals[currentSeg.id] ?? null : null;
+  });
+  const visualSec = $derived(backgroundClip ? sourceTimeSeconds(backgroundClip, time * 60000, Infinity) : currentSeg ? Math.max(0, (time - currentSeg.start) * 60) : 0);
+  // 영상만 크게 보기 — 대본·큐 글자를 숨기고 화면 연출만 확인한다.
+  let visualOnly = $state(false);
   const selectedCue = $derived(selectedCueId ? (cues.find((cue) => cue.id === selectedCueId) ?? null) : null);
   const selectedTrack = $derived(selectedCue ? (tracks.find((track) => track.id === selectedCue.trackId) ?? null) : null);
   const selectedBlockClip = $derived(
     selectedBlockId ? (blockClips.find((clip) => clip.block.id === selectedBlockId) ?? null) : null
   );
   const editableSet = $derived(new Set(editableTrackIds));
+
+  // 장면 배경 영상이 있으면 처음에는 실시간으로 시작한다(영상이 보이려면 실시간이어야 한다). 이후 배속은 직접 고를 수 있다.
+  let visualSpeedApplied = false;
+  $effect(() => {
+    if (!visualSpeedApplied && Object.keys(sceneVisuals).length > 0) {
+      visualSpeedApplied = true;
+      speed = 1;
+    }
+  });
 
   // 배경 영상이 연결되면 영상 시간이 곧 타임라인 시간이라 배속은 실시간으로 고정한다.
   $effect(() => {
@@ -358,10 +415,11 @@
   // ── 재생 — 탭이 가려져도 진행되도록 rAF 대신 interval 시계를 쓴다 ──
   // 배경 영상이 있으면 영상이 기준 시계: 재생/정지·시킹을 영상과 맞추고 시간은 영상에서 읽는다.
   function setPlaying(next: boolean) {
+    if (timer) { clearInterval(timer); timer = null; }
     playing = next;
     if (next) {
       if (time >= total) time = 0;
-      if (background && videoEl) {
+      if (totalMs === null && background && videoEl) {
         videoEl.currentTime = Math.min(time * 60, Math.max(0, (videoDurationSec ?? time * 60) - 0.05));
         videoEl.playbackRate = 1;
         void videoEl.play().catch(() => {
@@ -379,9 +437,9 @@
         }, 100);
         return;
       }
-      lastWall = Date.now();
+      lastWall = performance.now();
       timer = setInterval(() => {
-        const now = Date.now();
+        const now = performance.now();
         time += ((now - lastWall) / 1000 / 60) * speed;
         lastWall = now;
         if (time >= total) {
@@ -398,6 +456,40 @@
         timer = null;
       }
     }
+  }
+
+  // 기준점(화면 가로 위치)의 시각이 확대 전후로 같은 자리에 머물도록 스크롤을 맞춘다.
+  async function setZoom(next: number, anchorX?: number) {
+    const value = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, next));
+    if (value === pxm) return;
+    if (!scroller) { pxm = value; return; }
+    const anchor = anchorX ?? Math.min(scroller.clientWidth - 40, Math.max(LABEL_W + 40, LABEL_W + time * pxm - scroller.scrollLeft));
+    const timeAtAnchor = (scroller.scrollLeft + anchor - LABEL_W) / pxm;
+    pxm = value;
+    await tick();
+    if (scroller) scroller.scrollLeft = Math.max(0, timeAtAnchor * pxm + LABEL_W - anchor);
+  }
+  const zoomBy = (factor: number, anchorX?: number) => void setZoom(pxm * factor, anchorX);
+  async function fitAll() {
+    if (!scroller) return;
+    const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, (scroller.clientWidth - LABEL_W - 24) / Math.max(total, 0.25)));
+    pxm = next;
+    await tick();
+    if (scroller) scroller.scrollLeft = 0;
+  }
+  // Ctrl/⌘ + 휠 = 확대·축소(마우스 위치 기준), Shift + 휠 = 좌우 이동. 브라우저 확대와 겹치지 않게 passive:false로 막는다.
+  function wheelZoom(node: HTMLElement) {
+    const onWheel = (event: WheelEvent) => {
+      if (event.ctrlKey || event.metaKey) {
+        event.preventDefault();
+        zoomBy(event.deltaY < 0 ? 1.18 : 1 / 1.18, event.clientX - node.getBoundingClientRect().left);
+      } else if (event.shiftKey && Math.abs(event.deltaX) < 1) {
+        event.preventDefault();
+        node.scrollLeft += event.deltaY;
+      }
+    };
+    node.addEventListener("wheel", onWheel, { passive: false });
+    return { destroy: () => node.removeEventListener("wheel", onWheel) };
   }
 
   function scrollToPlayhead() {
@@ -436,6 +528,33 @@
     scrubbing = false;
   }
 
+  // 진행 위치가 바뀌어 현재 장면이 달라지면 아래 장면 목록에서도 그 장면이 보이게 가로로 스크롤한다.
+  let segStrip = $state<HTMLElement | null>(null);
+  $effect(() => {
+    const id = currentSeg?.id;
+    if (!segStrip || !id) return;
+    const chip = segStrip.querySelector<HTMLElement>(`[data-seg="${id}"]`);
+    if (chip) segStrip.scrollTo({ left: chip.offsetLeft - segStrip.clientWidth / 3, behavior: "smooth" });
+  });
+
+  // 크게 보기 화면의 하단 진행 바 — 누르거나 끌면 그 위치로 이동한다.
+  let barScrubbing = false;
+  function seekBar(event: PointerEvent) {
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    if (!rect.width || !total) return;
+    time = Math.min(total, Math.max(0, ((event.clientX - rect.left) / rect.width) * total));
+    if (background && videoEl) videoEl.currentTime = time * 60;
+    selectedCueId = null;
+    selectedBlockId = null;
+  }
+  function barDown(event: PointerEvent) {
+    barScrubbing = true;
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    seekBar(event);
+  }
+  function barMove(event: PointerEvent) { if (barScrubbing) seekBar(event); }
+  function barUp() { barScrubbing = false; }
+
   function jumpToSeg(seg: Segment) {
     time = seg.start + 0.001;
     selectedCueId = null;
@@ -466,6 +585,27 @@
 
   const canEditBlocks = $derived(canEditScript && !!onMoveBlock);
 
+  // ── 자석(스냅) — 끌던 클립의 시작이 재생 위치·다른 클립의 시작/끝·장면 경계에 8px 이내로 다가가면 달라붙고 보조선을 보여 준다.
+  const SNAP_PX = 8;
+  let snapGuideMin = $state<number | null>(null);
+  function snapTargetsMin(ignoreBlockId?: string, ignoreCueId?: string): number[] {
+    const list = [0, time];
+    for (const seg of segments) list.push(seg.start, seg.start + seg.dur);
+    for (const clip of blockClips) if (clip.block.id !== ignoreBlockId) list.push(clip.startMs / 60000, (clip.startMs + clip.durationMs) / 60000);
+    for (const cue of cues) if (cue.startMs != null && cue.id !== ignoreCueId) list.push(cue.startMs / 60000, (cue.startMs + effSec(cue) * 1000) / 60000);
+    return list;
+  }
+  /** 가까운 기준이 있으면 그 시각(분)을, 없으면 null. */
+  function nearestSnap(minute: number, targets: number[]): number | null {
+    let best: number | null = null;
+    let bestPx = SNAP_PX;
+    for (const target of targets) {
+      const px = Math.abs(target - minute) * pxm;
+      if (px <= bestPx) { best = target; bestPx = px; }
+    }
+    return best;
+  }
+
   let blockDrag = $state<{ blockId: string; startX: number; dx: number; leftMs: number; moved: boolean } | null>(null);
 
   function blockDragStart(event: PointerEvent, clip: BlockClip) {
@@ -481,17 +621,22 @@
     if (!blockDrag) return;
     const dx = event.clientX - blockDrag.startX;
     blockDrag = { ...blockDrag, dx, moved: blockDrag.moved || Math.abs(dx) > 3 };
+    if (event.shiftKey) snapGuideMin = null;
+    else snapGuideMin = nearestSnap((blockDrag.leftMs + (dx * 60000) / pxm) / 60000, snapTargetsMin(blockDrag.blockId));
   }
   function blockDragEnd(event: PointerEvent, clip: BlockClip) {
     if (!blockDrag) return;
     (event.currentTarget as HTMLElement).releasePointerCapture?.(event.pointerId);
     const d = blockDrag;
     blockDrag = null;
+    const snapped = snapGuideMin;
+    snapGuideMin = null;
     if (!d.moved) {
       pickBlock(clip); // 거의 안 움직였으면 클릭(선택)
       return;
     }
-    const startMs = Math.max(0, Math.round((d.leftMs + (d.dx * 60000) / PXM) / 500) * 500); // 0.5초 스냅
+    // 가까운 기준이 있으면 거기에 붙이고(Shift를 누르면 자석 없음), 아니면 0.5초 단위로 맞춘다.
+    const startMs = snapped != null ? Math.max(0, Math.round(snapped * 60000)) : Math.max(0, Math.round((d.leftMs + (d.dx * 60000) / PXM) / 500) * 500);
     onMoveBlock?.(d.blockId, startMs, clip.durationMs);
   }
 
@@ -556,7 +701,7 @@
   let resizing: { cueId: string; startX: number; startSec: number } | null = null;
 
   function resizeStart(event: PointerEvent, cue: Cue) {
-    if (!onResizeCue) return;
+    if (!onResizeCue || cue.fromComposition) return;
     event.stopPropagation();
     event.preventDefault();
     (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
@@ -584,7 +729,7 @@
   let clipDrag = $state<{ cueId: string; trackId: string; startX: number; dx: number; left: number; width: number; moved: boolean } | null>(null);
 
   function clipDragStart(event: PointerEvent, cue: Cue, left: number, width: number) {
-    if (!editableSet.has(cue.trackId)) return;
+    if (!editableSet.has(cue.trackId) || cue.fromComposition) return;
     if (cue.startMs != null ? !onMoveCue : !onReorderCue) return;
     clipDrag = { cueId: cue.id, trackId: cue.trackId, startX: event.clientX, dx: 0, left, width, moved: false };
     try {
@@ -597,20 +742,25 @@
     if (!clipDrag) return;
     const dx = event.clientX - clipDrag.startX;
     clipDrag = { ...clipDrag, dx, moved: clipDrag.moved || Math.abs(dx) > 3 };
+    const dragged = cues.find((item) => item.id === clipDrag!.cueId);
+    if (event.shiftKey || dragged?.startMs == null) snapGuideMin = null;
+    else snapGuideMin = nearestSnap((clipDrag.left + dx) / pxm, snapTargetsMin(undefined, clipDrag.cueId));
   }
   function clipDragEnd(event: PointerEvent, cue: Cue, seg: Segment) {
     if (!clipDrag) return;
     (event.currentTarget as HTMLElement).releasePointerCapture?.(event.pointerId);
     const d = clipDrag;
     clipDrag = null;
+    const snapped = snapGuideMin;
+    snapGuideMin = null;
     if (!d.moved) {
       pickCue(cue, seg); // 거의 안 움직였으면 클릭(선택)으로 처리
       return;
     }
-    // 시간 지정 큐는 놓은 위치가 곧 시작 시각 — 5초 단위로 맞춰 저장한다.
+    // 시간 지정 큐는 놓은 위치가 곧 시작 시각 — 가까운 기준이 있으면 거기에, 없으면 5초 단위로 맞춰 저장한다(Shift = 자석 없음).
     if (cue.startMs != null && onMoveCue) {
       const minutes = Math.max(0, (d.left + d.dx) / PXM);
-      const startMs = Math.round((minutes * 60) / 5) * 5 * 1000;
+      const startMs = snapped != null ? Math.max(0, Math.round(snapped * 60000)) : Math.round((minutes * 60) / 5) * 5 * 1000;
       onMoveCue(cue.id, startMs);
       return;
     }
@@ -639,6 +789,18 @@
     }
     if (event.key === "Escape" && presenting) {
       stopPresenting();
+    }
+    // 영상 편집기 같은 단축키 — 입력 칸에 있을 때와 수정키가 눌린 때는 건드리지 않는다.
+    const typing = /^(input|textarea|select)$/i.test(tag) || (event.target as HTMLElement).isContentEditable;
+    if (!typing && !presenting && !event.metaKey && !event.ctrlKey && !event.altKey && segments.length) {
+      const seek = (delta: number) => { event.preventDefault(); time = Math.min(total, Math.max(0, time + delta / 60)); if (background && videoEl) videoEl.currentTime = time * 60; scrollToPlayhead(); };
+      if (event.key === "ArrowRight") seek(event.shiftKey ? 10 : 1);
+      else if (event.key === "ArrowLeft") seek(event.shiftKey ? -10 : -1);
+      else if (event.key === "Home") { event.preventDefault(); time = 0; if (background && videoEl) videoEl.currentTime = 0; scrollToPlayhead(); }
+      else if (event.key === "End") { event.preventDefault(); time = total; if (background && videoEl) videoEl.currentTime = time * 60; scrollToPlayhead(); }
+      else if (event.key === "+" || event.key === "=") { event.preventDefault(); zoomBy(1.4); }
+      else if (event.key === "-" || event.key === "_") { event.preventDefault(); zoomBy(1 / 1.4); }
+      else if (event.key.toLowerCase() === "f") { event.preventDefault(); void fitAll(); }
     }
     if (presenting && (event.key === "ArrowRight" || event.key === "ArrowLeft")) {
       event.preventDefault();
@@ -675,9 +837,12 @@
     videoEl?.pause();
   });
 
+  // 눈금 간격은 확대 정도에 맞춰 바뀐다(글자가 80px 이상 떨어지도록).
+  const tickStep = $derived([1 / 12, 1 / 6, 0.25, 0.5, 1, 2, 5, 10, 15, 30].find((step) => step * pxm >= 80) ?? 30);
   const ticks = $derived.by(() => {
     const list: number[] = [];
-    for (let m = 0; m <= Math.floor(total); m += 2) list.push(m);
+    const count = Math.floor(total / tickStep + 1e-9);
+    for (let i = 0; i <= count && i < 2000; i += 1) list.push(Math.round(i * tickStep * 6000) / 6000);
     return list;
   });
 </script>
@@ -686,8 +851,8 @@
 
 {#if segments.length === 0}
   <div class="bg-card rounded-2xl px-6 py-14 text-center">
-    <p class="font-semibold">타임라인에 표시할 큐가 없습니다</p>
-    <p class="text-muted-foreground mt-1 text-sm">큐를 등록하면 장면 순서대로 배치됩니다.</p>
+    <p class="font-semibold">타임라인에 표시할 큐가 없어요</p>
+    <p class="text-muted-foreground mt-1 text-sm">큐를 등록하면 장면 순서대로 배치돼요.</p>
   </div>
 {:else}
   <div class="grid gap-2.5">
@@ -737,11 +902,11 @@
           구간 · 큐 목록
         </div>
         <div class="max-h-[430px] overflow-y-auto p-1.5">
-          {#each actBands as band (band.actId)}
+          {#each actBands as band (band.start)}
             {#if band.title}
               <p class="text-muted-foreground/70 px-2 pt-2 pb-0.5 text-[11px] font-bold">{band.title}</p>
             {/if}
-            {#each segments.filter((seg) => seg.actId === band.actId) as seg (seg.id)}
+            {#each segments.filter((seg) => seg.start >= band.start && seg.start < band.end) as seg (seg.id)}
               <button
                 type="button"
                 class="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-start text-xs transition-colors
@@ -760,14 +925,23 @@
       <!-- 스테이지 -->
       <section class="bg-card overflow-hidden rounded-xl border p-2.5">
         <div
-          class="relative flex min-h-[340px] flex-col justify-center gap-3 overflow-hidden rounded-lg px-7 pt-6 pb-14 text-zinc-50"
+          class="relative flex min-h-[340px] flex-col justify-center gap-3 overflow-hidden rounded-lg px-7 pt-6 pb-14 text-zinc-50 {visualOnly ? '[&>:not(.keep)]:invisible' : ''}"
           style="background:#101013;"
         >
           <div
             class="pointer-events-none absolute inset-0"
             style="background:radial-gradient(ellipse 75% 60% at 50% 8%, rgba(251,191,36,.14), transparent 65%);"
           ></div>
-          {#if background}
+          {@render visualLayer()}
+          {#if sceneVisual}
+            <div class="keep absolute top-3 right-3 z-10 flex gap-1.5">
+              {#if sceneVisual.kind === "VIDEO"}
+                <button type="button" class="rounded-md bg-black/55 px-2.5 py-1 text-[11px] font-semibold text-zinc-100 transition-colors hover:bg-black/75" onclick={() => (videoMuted = !videoMuted)}>{videoMuted ? "🔇 소리" : "🔊 소리"}</button>
+              {/if}
+              <button type="button" class="rounded-md bg-black/55 px-2.5 py-1 text-[11px] font-semibold text-zinc-100 transition-colors hover:bg-black/75" aria-pressed={visualOnly} onclick={() => (visualOnly = !visualOnly)}>{visualOnly ? "글자 보기" : "영상만 보기"}</button>
+            </div>
+          {/if}
+          {#if background && !sceneVisual}
             <!-- 뒷배경 영상 — 스테이지 뒤에 깔리며 타임라인 재생의 기준 시계가 된다 -->
             <video
               bind:this={videoEl}
@@ -778,7 +952,8 @@
               preload="auto"
               onloadedmetadata={() =>
                 (videoDurationSec = videoEl && Number.isFinite(videoEl.duration) ? videoEl.duration : null)}
-              onended={() => setPlaying(false)}
+              use:syncMedia={{ time: time * 60, play: playing, rate: 1, muted: videoMuted }}
+              onended={() => { if (totalMs === null) setPlaying(false); }}
             ></video>
             <button
               type="button"
@@ -818,7 +993,7 @@
             <p class="relative m-0 text-xs text-zinc-400 italic">{currentSeg.summary}</p>
           {/if}
           {#if currentSeg && currentSeg.blocks.length > 0}
-            <div class="relative mt-1 rounded-lg border border-white/10 bg-black/25 px-3.5 py-2.5">
+            <div class="relative mt-1 rounded-lg border border-white/10 bg-black/55 px-3.5 py-2.5 backdrop-blur-sm">
               <div class="flex items-center gap-2">
                 <p class="text-[10px] font-bold tracking-widest text-zinc-500 uppercase">
                   {selectedCue?.sceneId === currentSeg.id ? "선택한 큐 주변 대본" : "이 장면 대본 미리보기"}
@@ -835,7 +1010,9 @@
               </div>
               <div class="mt-1.5 grid {stageScriptExpanded ? 'max-h-[240px] overflow-y-auto pe-1' : ''} gap-1">
                 {#each stageScriptBlocks as block (block.id)}
-                  {#if block.type === "STAGE_DIRECTION" || block.type === "NOTE"}
+                  {#if block.type === "NOTE"}
+                    <p class="m-0 line-clamp-2 rounded bg-amber-400/10 px-1.5 text-[12px] text-amber-300/90"><span class="me-1 font-semibold">메모</span>{block.text}</p>
+                  {:else if block.type === "STAGE_DIRECTION"}
                     <p class="m-0 line-clamp-2 text-[12.5px] text-zinc-500 italic">{block.text}</p>
                   {:else}
                     <p class="m-0 line-clamp-2 text-[13px] leading-relaxed text-zinc-200">
@@ -946,7 +1123,7 @@
                       <button
                         type="button"
                         class="border-input hover:bg-accent inline-flex items-center justify-center rounded-lg border px-3 py-2 text-sm font-semibold transition-colors"
-                        title="명시한 시간을 지우고 자동 흐름 배치로 되돌립니다"
+                        title="명시한 시간을 지우고 자동 흐름 배치로 되돌려요"
                         onclick={clearBlockTiming}
                       >
                         자동 배치로
@@ -1064,7 +1241,7 @@
                       수정
                     </button>
                   {/if}
-                  {#if onDeleteCue}
+                  {#if onDeleteCue && !selectedCue.fromComposition}
                     <button
                       type="button"
                       class="text-destructive border-destructive/40 hover:bg-destructive/10 inline-flex items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-sm font-semibold transition-colors"
@@ -1134,7 +1311,7 @@
         <span class="font-mono text-[13px] tabular-nums">
           {fmt(time)} <span class="text-muted-foreground/60">/ {fmt(total)}</span>
         </span>
-        <div class="bg-muted flex rounded-lg p-0.5" title={background ? "배경 영상 연동 중에는 실시간만 지원합니다" : undefined}>
+        <div class="bg-muted flex rounded-lg p-0.5" title={background ? "배경 영상을 연동하는 동안에는 실시간 재생만 지원해요" : undefined}>
           {#each [1, 20, 60] as s (s)}
             <button
               type="button"
@@ -1148,12 +1325,20 @@
             </button>
           {/each}
         </div>
-        <span class="text-muted-foreground/60 ms-auto hidden text-[11.5px] xl:block">
-          눈금 드래그로 이동 · 스페이스로 재생 · 큐 블록 클릭으로 상세{background ? " · 배경 영상 연동 중" : ""}
+        <div class="ms-auto flex items-center gap-1.5" role="group" aria-label="타임라인 확대·축소">
+          <button type="button" class="hover:bg-muted flex size-7 items-center justify-center rounded-md border text-sm font-semibold" aria-label="축소" title="축소 (-)" onclick={() => zoomBy(1 / 1.4)}>−</button>
+          <input type="range" class="accent-primary hidden w-24 sm:block" min="0" max="100" step="1" aria-label="확대 정도"
+            value={Math.round((Math.log(pxm / ZOOM_MIN) / Math.log(ZOOM_MAX / ZOOM_MIN)) * 100)}
+            oninput={(event) => void setZoom(ZOOM_MIN * Math.pow(ZOOM_MAX / ZOOM_MIN, Number(event.currentTarget.value) / 100))} />
+          <button type="button" class="hover:bg-muted flex size-7 items-center justify-center rounded-md border text-sm font-semibold" aria-label="확대" title="확대 (+)" onclick={() => zoomBy(1.4)}>+</button>
+          <button type="button" class="hover:bg-muted rounded-md border px-2 py-1 text-[11.5px] font-medium" title="전체 보기 (F)" onclick={fitAll}>전체 보기</button>
+        </div>
+        <span class="text-muted-foreground/60 hidden text-[11.5px] 2xl:block">
+          Ctrl+휠 확대 · 스페이스 재생 · ←→ 1초 이동{background ? " · 배경 영상 연동 중" : ""}
         </span>
       </div>
 
-      <div class="overflow-x-auto overscroll-x-contain" bind:this={scroller}>
+      <div class="overflow-x-auto overscroll-x-contain" bind:this={scroller} use:wheelZoom>
         <div class="relative min-w-max pb-2.5" data-tl-inner>
           <!-- 눈금 -->
           <div class="grid" style={`grid-template-columns:${LABEL_W}px 1fr;`}>
@@ -1202,8 +1387,8 @@
               onpointermove={scrubMove}
               onpointerup={scrubUp}
             >
-              {#each actBands as band (band.actId)}
-                {@const on = currentSeg?.actId === band.actId}
+              {#each actBands as band (band.start)}
+                {@const on = Boolean(currentSeg && currentSeg.start >= band.start && currentSeg.start < band.end)}
                 <div
                   class="absolute inset-y-[3px] flex items-center overflow-hidden rounded-md border px-2 text-[11px] font-bold whitespace-nowrap
                     {on ? 'border-primary/40 bg-primary/15 text-primary' : 'bg-muted/60 text-muted-foreground'}"
@@ -1214,6 +1399,29 @@
               {/each}
             </div>
           </div>
+
+          <!-- 배경 영상 레인 — 장·막 구성에서 장면에 연결한 영상이 그 장면의 시간 동안 깔린다(음악·큐와 무관). -->
+          {#if !background && segments.some((seg) => sceneVisuals[seg.id])}
+            <div class="grid border-t" style={`grid-template-columns:${LABEL_W}px 1fr;`}>
+              <div class="bg-card text-muted-foreground sticky left-0 z-10 flex items-center border-e px-2.5 text-[11.5px] font-bold" title="장면에 연결한 배경 영상">
+                배경 영상
+              </div>
+              <div class="relative h-[28px]" style={`width:${total * PXM}px;`}>
+                {#each segments as seg (seg.id)}
+                  {@const visual = sceneVisuals[seg.id]}
+                  {#if visual}
+                    <div
+                      class="absolute inset-y-[3px] flex items-center gap-1 overflow-hidden rounded-md border border-pink-500/40 bg-pink-500/10 px-1.5 text-[10.5px] whitespace-nowrap text-pink-700 dark:text-pink-300"
+                      style={`left:${seg.start * PXM}px;width:${Math.max(4, seg.dur * PXM - 3)}px;`}
+                      title={`${seg.title} · ${visual.label ?? "배경 영상"}${visual.loop ? " (장면이 끝날 때까지 반복)" : ""}`}
+                    >
+                      <span aria-hidden="true">{visual.kind === "IMAGE" ? "🖼" : "▶"}</span><span class="truncate">{visual.label ?? "배경 영상"}</span>
+                    </div>
+                  {/if}
+                {/each}
+              </div>
+            </div>
+          {/if}
 
           <!-- 대본 블록 레인 — 대본이 타임라인에서 언제 보이는지. 끌어서 옮기고 끝을 끌어 길이 조절 -->
           {#if blockClips.length > 0}
@@ -1309,7 +1517,7 @@
                 role={canAdd ? "button" : undefined}
                 tabindex={canAdd ? -1 : undefined}
                 aria-label={canAdd ? `${track.name} 트랙 빈 곳을 누르면 큐 추가` : undefined}
-                title={canAdd ? "빈 곳을 누르면 이 위치에 큐를 추가합니다" : undefined}
+                title={canAdd ? "빈 곳을 누르면 이 위치에 큐를 추가해요" : undefined}
                 onclick={canAdd ? (event) => laneClick(event, track.id) : undefined}
                 onkeydown={canAdd ? () => {} : undefined}
               >
@@ -1342,7 +1550,7 @@
                           <span class="shrink-0 text-[10px] font-semibold" style={`color:${color};`}>{clip.cue.character.name}</span>
                         {/if}
                         <span class="text-muted-foreground truncate">{clip.cue.content}</span>
-                        {#if canAdd && onResizeCue}
+                        {#if canAdd && onResizeCue && !clip.cue.fromComposition}
                           <!-- svelte-ignore a11y_no_static_element_interactions -->
                           <span
                             class="absolute inset-y-0 right-0 z-10 w-2 cursor-ew-resize rounded-e-md hover:bg-white/25"
@@ -1401,6 +1609,13 @@
             {/if}
           {/each}
 
+          <!-- 자석 보조선 — 끌던 클립이 달라붙을 자리 -->
+          {#if snapGuideMin !== null}
+            <div class="pointer-events-none absolute top-0 bottom-0 z-30 w-0 border-s border-dashed border-pink-500" style={`left:${LABEL_W + snapGuideMin * PXM}px;`}>
+              <span class="absolute top-0.5 left-1 rounded bg-pink-500 px-1 py-px font-mono text-[10px] text-white">{fmt(snapGuideMin)}</span>
+            </div>
+          {/if}
+
           <!-- 플레이헤드 -->
           <div
             class="border-primary pointer-events-none absolute top-0 bottom-0 z-20 w-0 border-s-2"
@@ -1416,11 +1631,31 @@
     </div>
 
     <p class="text-muted-foreground/60 text-center text-[11.5px]">
-      실선 큐는 지정된 시각에, 점선 큐는 순서에 맞춰 자동으로 놓입니다 · 큐를 끌어 옮기고 오른쪽 끝을 끌어 길이를 조절합니다{onAddCue
-        ? " · 빈 레인을 누르면 큐를 추가합니다"
-        : ""}{canEditBlocks ? " · 대본 블록도 같은 방식으로 옮깁니다" : ""}
+      실선 큐는 지정한 시각에, 점선 큐는 순서에 맞춰 자동으로 놓여요 · 큐를 끌어 옮기면 재생 위치·다른 클립에 자석처럼 붙고(Shift = 자석 끔), 오른쪽 끝을 끌어 길이를 조절할 수 있어요{onAddCue
+        ? " · 빈 레인을 누르면 큐를 추가해요"
+        : ""}{canEditBlocks ? " · 대본 블록도 같은 방식으로 옮길 수 있어요" : ""}
     </p>
   </div>
+
+  {#snippet visualLayer()}
+    {#if sceneVisual}
+      {#key sceneVisual.url}
+        {#if sceneVisual.kind === "IMAGE"}
+          <img src={sceneVisual.url} alt="" class="keep pointer-events-none absolute inset-0 h-full w-full object-cover opacity-80" />
+        {:else}
+          <video
+            src={sceneVisual.url}
+            class="keep pointer-events-none absolute inset-0 h-full w-full object-cover opacity-80"
+            playsinline
+            preload="auto"
+            use:syncMedia={{ time: visualSec, play: playing && speed === 1, rate: 1, muted: videoMuted, loop: sceneVisual.loop, sourceStart: sceneVisual.sourceStartSec }}
+          ><track kind="captions" /></video>
+        {/if}
+      {/key}
+      <!-- 글자가 읽히도록 어둡게 깐다 -->
+      <div class="keep pointer-events-none absolute inset-0" style="background:linear-gradient(rgba(0,0,0,.2), rgba(0,0,0,.6));"></div>
+    {/if}
+  {/snippet}
 
   <!-- 발표(진행) 모드 — 전체 화면, 재생 전용 -->
   {#if presenting}
@@ -1430,6 +1665,7 @@
       role="dialog"
       aria-label="진행 모드"
     >
+      {@render visualLayer()}
       <div
         class="pointer-events-none absolute inset-0"
         style="background:radial-gradient(ellipse 70% 50% at 50% 0%, rgba(251,191,36,.12), transparent 60%);"
@@ -1548,11 +1784,12 @@
 
       <!-- 장면 스트립 + 진행 바 -->
       <div class="relative grid gap-2.5">
-        <div class="flex gap-1.5 overflow-x-auto pb-1">
+        <div class="flex gap-1.5 overflow-x-auto pb-1" bind:this={segStrip}>
           {#each segments as seg (seg.id)}
             {@const on = currentSeg?.id === seg.id}
             <button
               type="button"
+              data-seg={seg.id}
               class="shrink-0 rounded-lg px-3 py-1.5 text-xs font-semibold whitespace-nowrap transition-colors
                 {on ? 'bg-amber-400 text-zinc-950' : 'bg-zinc-800/80 text-zinc-400 hover:text-zinc-100'}"
               onclick={() => jumpToSeg(seg)}
@@ -1562,10 +1799,27 @@
             </button>
           {/each}
         </div>
-        <div class="h-1 overflow-hidden rounded-full bg-zinc-800">
-          <div class="h-full rounded-full bg-amber-400" style={`width:${total ? (time / total) * 100 : 0}%;`}></div>
+        <!-- 눈에 보이는 막대는 얇지만 누르는 영역은 넉넉하게(모바일 터치 포함) -->
+        <div
+          class="group relative -my-2 flex h-6 cursor-pointer touch-none items-center"
+          role="slider"
+          tabindex="-1"
+          aria-label="공연 진행 위치"
+          aria-valuemin={0}
+          aria-valuemax={Math.round(total * 60)}
+          aria-valuenow={Math.round(time * 60)}
+          aria-valuetext={`${fmt(time)} / ${fmt(total)}`}
+          onpointerdown={barDown}
+          onpointermove={barMove}
+          onpointerup={barUp}
+          onpointercancel={barUp}
+        >
+          <div class="h-1 w-full overflow-hidden rounded-full bg-zinc-800 transition-[height] group-hover:h-2">
+            <div class="h-full rounded-full bg-amber-400" style={`width:${total ? (time / total) * 100 : 0}%;`}></div>
+          </div>
+          <span class="pointer-events-none absolute size-3 -translate-x-1/2 rounded-full bg-amber-300 shadow" style={`left:${total ? (time / total) * 100 : 0}%;`}></span>
         </div>
-        <p class="text-center text-xs text-zinc-600">← → 장면 이동 · 스페이스 재생 · ESC 종료</p>
+        <p class="text-center text-xs text-zinc-600">진행 바를 눌러 이동 · ← → 장면 이동 · 스페이스 재생 · ESC 종료{total ? ` · ${fmt(time)} / ${fmt(total)}` : ""}</p>
       </div>
     </div>
   {/if}
